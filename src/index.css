@@ -1,0 +1,108 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  @apply m-0 min-h-screen font-sans text-slate-100 antialiased;
+  background-color: #030712;
+  background-image:
+    radial-gradient(ellipse 100% 70% at 0% -10%, rgba(34, 211, 238, 0.14), transparent 52%),
+    radial-gradient(ellipse 90% 55% at 100% -5%, rgba(139, 92, 246, 0.11), transparent 48%),
+    radial-gradient(ellipse 70% 45% at 50% 110%, rgba(20, 184, 166, 0.07), transparent 55%);
+  background-attachment: fixed;
+}
+
+#root {
+  @apply min-h-screen;
+}
+
+html.light {
+  color-scheme: light;
+}
+
+html.light body {
+  @apply text-slate-900;
+  background-color: #f1f5f9;
+  background-image:
+    radial-gradient(ellipse 100% 60% at 0% 0%, rgba(14, 165, 233, 0.12), transparent 50%),
+    radial-gradient(ellipse 80% 50% at 100% 10%, rgba(139, 92, 246, 0.08), transparent 45%);
+}
+
+html.light .panel {
+  @apply border-slate-200/90 bg-white/85 text-slate-900 shadow-slate-300/30;
+}
+
+html.light .btn {
+  @apply border-slate-200/90 bg-white text-slate-800 shadow-sm hover:border-slate-300 hover:bg-slate-50;
+}
+
+html.light .btn-primary {
+  @apply text-white shadow-cyan-500/20;
+}
+
+html.light .input {
+  @apply border-slate-200 bg-white text-slate-900 placeholder:text-slate-400;
+}
+
+html.light .control-btn {
+  @apply text-slate-800 hover:bg-slate-100;
+}
+
+html.light header {
+  @apply border-slate-200/70 bg-white/75 text-slate-900;
+}
+
+html.light header .rounded-full {
+  @apply border-slate-200/80 bg-slate-100/80 text-slate-600;
+}
+
+html.light aside {
+  @apply border-slate-200/80 bg-white/85 text-slate-900 shadow-slate-300/20;
+}
+
+.panel {
+  @apply rounded-2xl border border-white/[0.08] bg-slate-900/45 shadow-2xl shadow-black/50 backdrop-blur-xl;
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.04) inset,
+    0 24px 48px -12px rgba(0, 0, 0, 0.45);
+}
+
+.btn {
+  @apply inline-flex items-center gap-2 rounded-xl border border-white/[0.08] bg-white/[0.06] px-3.5 py-2 text-sm font-medium text-slate-100 shadow-sm backdrop-blur-sm transition duration-200;
+  @apply hover:border-white/[0.12] hover:bg-white/[0.1];
+  @apply focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/50 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950;
+  @apply disabled:cursor-not-allowed disabled:opacity-40;
+}
+
+.btn-primary {
+  @apply border-transparent bg-gradient-to-r from-cyan-500 to-sky-500 font-semibold text-white shadow-lg shadow-cyan-500/25;
+  @apply hover:from-cyan-400 hover:to-sky-400 hover:border-transparent;
+  @apply focus-visible:ring-cyan-300/60 focus-visible:ring-offset-slate-950;
+}
+
+.input {
+  @apply w-full rounded-xl border border-white/[0.08] bg-slate-950/50 px-3.5 py-2.5 text-sm text-slate-100 shadow-inner backdrop-blur-sm;
+  @apply placeholder:text-slate-500;
+  @apply focus:border-cyan-500/40 focus:outline-none focus:ring-2 focus:ring-cyan-500/25;
+}
+
+.control-btn {
+  @apply inline-flex items-center justify-center rounded-xl px-2.5 py-1.5 text-slate-100 transition duration-150;
+  @apply hover:bg-white/[0.08];
+  @apply focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/45;
+  @apply disabled:cursor-not-allowed disabled:opacity-40;
+}
+
+/* Content tiles (movies, etc.) */
+.card-tile {
+  @apply overflow-hidden rounded-2xl border border-white/[0.07] bg-white/[0.04] shadow-lg shadow-black/30 backdrop-blur-sm transition duration-300;
+  @apply hover:border-white/[0.12] hover:bg-white/[0.07] hover:shadow-xl hover:shadow-cyan-950/20;
+}
+
+.card-tile-active {
+  @apply border-cyan-400/50 shadow-glow-cyan ring-2 ring-cyan-400/30;
+}
