@@ -1,5 +1,9 @@
 # Community IPTV Player
 
+## Live App
+
+https://community-iptv-player.vercel.app
+
 ## Manifesto
 
 The goal of this repository is not only to deliver an IPTV player, but also to demonstrate a broader point about software development:
