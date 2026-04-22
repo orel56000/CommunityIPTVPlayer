@@ -19,6 +19,7 @@
   "license": "MIT",
   "description": "Community IPTV Player (CTV), a client-side IPTV web app with localStorage persistence",
   "dependencies": {
+    "@vercel/analytics": "^2.0.1",
     "clsx": "^2.1.1",
     "hls.js": "^1.6.16",
     "lucide-react": "^1.8.0",

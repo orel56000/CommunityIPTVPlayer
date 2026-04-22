@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
+import { Analytics } from "@vercel/analytics/react";
 import type { AppSettings, UIFilters } from "./types/player";
 import type { PlaylistItem, PlaylistSection, SavedPlaylist } from "./types/models";
 import { storage } from "./utils/storage";
@@ -836,6 +837,7 @@ const App = () => {
         onSubmit={handleImport}
       />
       <InstallAppBanner />
+      <Analytics />
     </div>
   );
 };
