@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Hls from "hls.js";
+import mpegts from "mpegts.js";
 import type { PlaylistItem } from "../../types/models";
 import { useChromecast } from "../../hooks/useChromecast";
 import { downloadMediaFile, isHlsUrl } from "../../utils/downloadStream";
@@ -21,6 +22,124 @@ interface VideoPlayerProps {
 }
 
 const CONTROLS_HIDE_MS = 2400;
+const SOURCE_STARTUP_TIMEOUT_MS = 12000;
+const MPEGTS_STARTUP_TIMEOUT_MS = 25000;
+const ENABLE_STREAM_PROXY = false;
+
+const isTransportStreamUrl = (url: string): boolean => {
+  const lower = url.toLowerCase();
+  return /\.ts(\?|$)/i.test(url) || /[?&]output=ts(?:&|$)/i.test(url) || lower.includes("output=ts");
+};
+
+const toHlsVariantUrl = (url: string): string | null => {
+  let next = url;
+  let changed = false;
+  if (/\.ts(\?|$)/i.test(next)) {
+    next = next.replace(/\.ts(\?|$)/i, ".m3u8$1");
+    changed = true;
+  }
+  if (/[?&]output=ts(?:&|$)/i.test(next)) {
+    next = next.replace(/([?&]output=)ts(&|$)/i, "$1m3u8$2");
+    changed = true;
+  }
+  return changed && next !== url ? next : null;
+};
+
+const toOutputM3u8Url = (url: string): string | null => {
+  try {
+    const parsed = new URL(url);
+    if (parsed.searchParams.get("output")?.toLowerCase() === "m3u8") return null;
+    parsed.searchParams.set("output", "m3u8");
+    const next = parsed.toString();
+    return next !== url ? next : null;
+  } catch {
+    return null;
+  }
+};
+
+const toPathM3u8Url = (url: string): string | null => {
+  try {
+    const parsed = new URL(url);
+    if (/\.(m3u8|mp4|m4v|webm|mov|avi|mkv|mpg|mpeg|ts)$/i.test(parsed.pathname)) return null;
+    const nextPath = parsed.pathname.endsWith("/") ? `${parsed.pathname}index.m3u8` : `${parsed.pathname}.m3u8`;
+    parsed.pathname = nextPath;
+    const next = parsed.toString();
+    return next !== url ? next : null;
+  } catch {
+    return null;
+  }
+};
+
+const toPathTsUrl = (url: string): string | null => {
+  try {
+    const parsed = new URL(url);
+    if (/\.(ts|m3u8|mp4|m4v|webm|mov|avi|mkv|mpg|mpeg)$/i.test(parsed.pathname)) return null;
+    const nextPath = parsed.pathname.endsWith("/") ? `${parsed.pathname}index.ts` : `${parsed.pathname}.ts`;
+    parsed.pathname = nextPath;
+    const next = parsed.toString();
+    return next !== url ? next : null;
+  } catch {
+    return null;
+  }
+};
+
+const shouldUseHlsEngine = (url: string): boolean => {
+  if (!Hls.isSupported()) return false;
+  const lower = url.toLowerCase();
+  return isHlsUrl(url) || lower.includes("output=m3u8") || lower.includes("format=m3u8");
+};
+
+const canUseMpegTsEngine = (): boolean => mpegts.isSupported() && Boolean(mpegts.getFeatureList().mseLivePlayback);
+
+const isKnownNativeVideoUrl = (url: string): boolean =>
+  /\.(mp4|m4v|webm|mov|avi|mkv|mpg|mpeg)(\?|$)/i.test(url.toLowerCase());
+
+const shouldPreferHlsEngine = (url: string, section: PlaylistItem["section"]): boolean => {
+  if (!Hls.isSupported()) return false;
+  if (shouldUseHlsEngine(url)) return true;
+  // For ambiguous live URLs, prefer MPEG-TS probing first.
+  if (section === "live" && !isKnownNativeVideoUrl(url)) return false;
+  return false;
+};
+
+const shouldTryMpegTsEngine = (url: string, section: PlaylistItem["section"]): boolean => {
+  if (!canUseMpegTsEngine()) return false;
+  if (isTransportStreamUrl(url)) return true;
+  if (section === "live" && !isKnownNativeVideoUrl(url) && !shouldUseHlsEngine(url)) return true;
+  return false;
+};
+
+const mediaErrorName = (code?: number): string => {
+  switch (code) {
+    case MediaError.MEDIA_ERR_ABORTED:
+      return "MEDIA_ERR_ABORTED";
+    case MediaError.MEDIA_ERR_NETWORK:
+      return "MEDIA_ERR_NETWORK";
+    case MediaError.MEDIA_ERR_DECODE:
+      return "MEDIA_ERR_DECODE";
+    case MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED:
+      return "MEDIA_ERR_SRC_NOT_SUPPORTED";
+    default:
+      return "UNKNOWN_MEDIA_ERROR";
+  }
+};
+
+const isAbortLikeError = (error: unknown): boolean =>
+  (error instanceof DOMException && error.name === "AbortError") ||
+  (error instanceof Error && /abort/i.test(error.name));
+
+const shouldUseStreamProxy = (mode: "hls" | "mpegts" | "native"): boolean => ENABLE_STREAM_PROXY && mode !== "hls";
+
+const toStreamProxyUrl = (url: string): string => `/api/stream?url=${encodeURIComponent(url)}`;
+
+const isCrossOriginStream = (url: string): boolean => {
+  try {
+    const parsed = new URL(url);
+    return parsed.origin !== window.location.origin;
+  } catch {
+    return false;
+  }
+};
 
 export const VideoPlayer = ({
   item,
@@ -39,8 +158,11 @@ export const VideoPlayer = ({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const hlsRef = useRef<Hls | null>(null);
+  const mpegtsRef = useRef<ReturnType<typeof mpegts.createPlayer> | null>(null);
+  const switchingSourceRef = useRef(false);
   const hasAppliedResumeRef = useRef(false);
   const hideTimerRef = useRef<number | null>(null);
+  const startupTimerRef = useRef<number | null>(null);
 
   const onProgressRef = useRef(onProgress);
   const onEndedRef = useRef(onEnded);
@@ -59,6 +181,19 @@ export const VideoPlayer = ({
   const [controlsVisible, setControlsVisible] = useState(true);
   const [downloadBusy, setDownloadBusy] = useState(false);
   const [downloadHint, setDownloadHint] = useState<string | null>(null);
+
+  useEffect(() => {
+    const onUnhandledRejection = (event: PromiseRejectionEvent) => {
+      const reason = event.reason;
+      if (!(reason instanceof Error || reason instanceof DOMException)) return;
+      const message = `${reason.name} ${reason.message}`.toLowerCase();
+      if (message.includes("aborterror") && message.includes("bodystreambuffer was aborted")) {
+        event.preventDefault();
+      }
+    };
+    window.addEventListener("unhandledrejection", onUnhandledRejection);
+    return () => window.removeEventListener("unhandledrejection", onUnhandledRejection);
+  }, []);
 
   useEffect(() => {
     onProgressRef.current = onProgress;
@@ -145,6 +280,34 @@ export const VideoPlayer = ({
     }
   }, []);
 
+  const clearStartupTimer = useCallback(() => {
+    if (startupTimerRef.current != null) {
+      window.clearTimeout(startupTimerRef.current);
+      startupTimerRef.current = null;
+    }
+  }, []);
+
+  const destroyMpegTsPlayer = useCallback(() => {
+    if (!mpegtsRef.current) return;
+    const player = mpegtsRef.current;
+    mpegtsRef.current = null;
+    try {
+      player.pause();
+    } catch {
+      // no-op
+    }
+    try {
+      player.detachMediaElement();
+    } catch {
+      // no-op
+    }
+    try {
+      player.destroy();
+    } catch {
+      // no-op
+    }
+  }, []);
+
   const scheduleHide = useCallback(() => {
     if (hideTimerRef.current != null) {
       window.clearTimeout(hideTimerRef.current);
@@ -187,6 +350,7 @@ export const VideoPlayer = ({
       hlsRef.current.destroy();
       hlsRef.current = null;
     }
+    destroyMpegTsPlayer();
 
     const onLoadedMetadata = () => {
       const resumePoint = resumeFromRef.current;
@@ -197,7 +361,10 @@ export const VideoPlayer = ({
       }
       hasAppliedResumeRef.current = true;
     };
-    const onLoadedData = () => setLoading(false);
+    const onLoadedData = () => {
+      clearStartupTimer();
+      setLoading(false);
+    };
     const onDurationChange = () => setDuration(Number.isFinite(video.duration) ? video.duration : 0);
     const onPlay = () => {
       setIsPlaying(true);
@@ -208,7 +375,10 @@ export const VideoPlayer = ({
       onPlayingStateRef.current(false);
     };
     const onWaiting = () => setLoading(true);
-    const onPlaying = () => setLoading(false);
+    const onPlaying = () => {
+      clearStartupTimer();
+      setLoading(false);
+    };
     const onTimeUpdate = () => {
       setCurrentTime(video.currentTime);
       if (video.buffered.length > 0) setBuffered(video.buffered.end(video.buffered.length - 1));
@@ -221,11 +391,283 @@ export const VideoPlayer = ({
       onProgressRef.current(video.duration, video.duration);
       onEndedRef.current();
     };
-    const onErrorEvent = () => {
-      const message = "Playback failed. Stream may be unavailable or blocked.";
+    type PlaybackMode = "hls" | "mpegts" | "native";
+    const modeLabel = (mode: PlaybackMode): "hls.js" | "mpegts.js" | "native-video" =>
+      mode === "hls" ? "hls.js" : mode === "mpegts" ? "mpegts.js" : "native-video";
+    let attemptIndex = 0;
+    const tsVariantCandidate = toPathTsUrl(item.streamUrl);
+    const fallbackCandidates = [tsVariantCandidate, toHlsVariantUrl(item.streamUrl), toOutputM3u8Url(item.streamUrl), toPathM3u8Url(item.streamUrl)]
+      .filter((value, index, arr): value is string => Boolean(value) && arr.indexOf(value) === index);
+    const isTsFallbackCase = isTransportStreamUrl(item.streamUrl) && fallbackCandidates.length > 0;
+    const playbackAttempts: Array<{ url: string; mode: PlaybackMode; viaProxy: boolean; reason: string }> = [];
+    const pushAttempt = (url: string, mode: PlaybackMode, viaProxy: boolean, reason: string) => {
+      if (playbackAttempts.some((attempt) => attempt.url === url && attempt.mode === mode && attempt.viaProxy === viaProxy)) return;
+      playbackAttempts.push({ url, mode, viaProxy, reason });
+    };
+    const pushModeAttempts = (url: string, mode: PlaybackMode, reason: string) => {
+      const allowProxy = shouldUseStreamProxy(mode);
+      const proxyFirst = allowProxy && isCrossOriginStream(url);
+      if (proxyFirst) {
+        pushAttempt(url, mode, true, `${reason}-via-proxy`);
+        pushAttempt(url, mode, false, reason);
+        return;
+      }
+      pushAttempt(url, mode, false, reason);
+      if (allowProxy) pushAttempt(url, mode, true, `${reason}-via-proxy`);
+    };
+    const primaryMode: PlaybackMode =
+      item.section === "live" && !isKnownNativeVideoUrl(item.streamUrl) && shouldTryMpegTsEngine(item.streamUrl, item.section)
+        ? "mpegts"
+        : shouldPreferHlsEngine(item.streamUrl, item.section)
+          ? "hls"
+          : shouldTryMpegTsEngine(item.streamUrl, item.section)
+            ? "mpegts"
+            : "native";
+    pushModeAttempts(item.streamUrl, primaryMode, "primary");
+    if (primaryMode !== "hls") pushModeAttempts(item.streamUrl, "hls", "hls-fallback-same-url");
+    if (primaryMode !== "mpegts") pushModeAttempts(item.streamUrl, "mpegts", "mpegts-fallback-same-url");
+    pushModeAttempts(item.streamUrl, "native", "native-fallback-same-url");
+    for (const fallbackCandidate of fallbackCandidates) {
+      if (/\.ts(\?|$)/i.test(fallbackCandidate)) {
+        pushModeAttempts(fallbackCandidate, "mpegts", "derived-ts-url");
+        pushModeAttempts(fallbackCandidate, "native", "native-fallback-derived-ts-url");
+        continue;
+      }
+      pushModeAttempts(fallbackCandidate, "hls", "derived-hls-url");
+      pushModeAttempts(fallbackCandidate, "mpegts", "mpegts-fallback-derived-url");
+      pushModeAttempts(fallbackCandidate, "native", "native-fallback-derived-url");
+    }
+    const playbackDebugContext = {
+      itemId: item.id,
+      title: item.title,
+      section: item.section,
+      streamCandidates: playbackAttempts.map((attempt) => `${attempt.mode}${attempt.viaProxy ? "+proxy" : ""}:${attempt.url}`),
+      autoplay,
+      hlsSupported: Hls.isSupported(),
+      mpegtsSupported: canUseMpegTsEngine(),
+    };
+
+    console.info("[IPTV][Player] Starting stream playback", playbackDebugContext);
+
+    const tryNextAttempt = (reason: string): boolean => {
+      const nextIndex = attemptIndex + 1;
+      if (nextIndex >= playbackAttempts.length) return false;
+      console.warn("[IPTV][Player] Switching to fallback source", {
+        ...playbackDebugContext,
+        reason,
+        fromUrl: playbackAttempts[attemptIndex].url,
+        fromMode: `${modeLabel(playbackAttempts[attemptIndex].mode)}${playbackAttempts[attemptIndex].viaProxy ? "+proxy" : ""}`,
+        toUrl: playbackAttempts[nextIndex].url,
+        toMode: `${modeLabel(playbackAttempts[nextIndex].mode)}${playbackAttempts[nextIndex].viaProxy ? "+proxy" : ""}`,
+        fromAttempt: attemptIndex,
+        toAttempt: nextIndex,
+      });
+      attemptIndex = nextIndex;
+      startCandidate(playbackAttempts[nextIndex]);
+      return true;
+    };
+
+    const finalizeError = (message: string) => {
+      clearStartupTimer();
+      console.error("[IPTV][Player] Playback failed", {
+        ...playbackDebugContext,
+        message,
+        activeAttempt: attemptIndex,
+        activeUrl: playbackAttempts[attemptIndex]?.url,
+        activeMode: playbackAttempts[attemptIndex]
+          ? `${modeLabel(playbackAttempts[attemptIndex].mode)}${playbackAttempts[attemptIndex].viaProxy ? "+proxy" : ""}`
+          : "native-video",
+      });
       setLocalError(message);
       onErrorRef.current(message);
       setLoading(false);
+    };
+
+    const playCurrent = () => {
+      if (!autoplay) return;
+      void video.play().catch(() => {
+        onErrorRef.current("Autoplay is blocked by browser policy. Press play to start.");
+      });
+    };
+
+    const startCandidate = (attempt: { url: string; mode: PlaybackMode; viaProxy: boolean; reason: string }) => {
+      const { url: sourceUrl, mode, viaProxy, reason } = attempt;
+      const requestUrl = viaProxy ? toStreamProxyUrl(sourceUrl) : sourceUrl;
+      const timeoutMs = mode === "mpegts" ? MPEGTS_STARTUP_TIMEOUT_MS : SOURCE_STARTUP_TIMEOUT_MS;
+      const armStartupTimeout = () => {
+        clearStartupTimer();
+        startupTimerRef.current = window.setTimeout(() => {
+          console.error("[IPTV][Player] Source startup timeout", {
+            ...playbackDebugContext,
+            attempt: attemptIndex,
+            sourceUrl,
+            requestUrl,
+            sourceMode: `${modeLabel(mode)}${viaProxy ? "+proxy" : ""}`,
+            timeoutMs,
+            readyState: video.readyState,
+            networkState: video.networkState,
+          });
+          if (!tryNextAttempt("startup-timeout")) {
+            const message = "Stream is taking too long to start. Provider may be blocking browser playback.";
+            finalizeError(message);
+          }
+        }, timeoutMs);
+      };
+      switchingSourceRef.current = true;
+      if (hlsRef.current) {
+        hlsRef.current.destroy();
+        hlsRef.current = null;
+      }
+      destroyMpegTsPlayer();
+      video.pause();
+      video.removeAttribute("src");
+      video.load();
+      setLoading(true);
+      setLocalError(null);
+      onErrorRef.current(null);
+      if (autoplay) {
+        armStartupTimeout();
+      }
+      console.info("[IPTV][Player] Trying source", {
+        ...playbackDebugContext,
+        sourceUrl,
+        requestUrl,
+        attempt: attemptIndex,
+        attemptReason: reason,
+        mode: `${modeLabel(mode)}${viaProxy ? "+proxy" : ""}`,
+      });
+      if (mode === "hls") {
+        const hls = new Hls();
+        hlsRef.current = hls;
+        hls.loadSource(requestUrl);
+        hls.attachMedia(video);
+        hls.on(Hls.Events.MANIFEST_PARSED, () => {
+          console.info("[IPTV][Player] HLS manifest parsed", {
+            ...playbackDebugContext,
+            sourceUrl,
+            requestUrl,
+            attempt: attemptIndex,
+          });
+        });
+        hls.on(Hls.Events.LEVEL_LOADED, (_event, data) => {
+          console.info("[IPTV][Player] HLS level loaded", {
+            ...playbackDebugContext,
+            sourceUrl,
+            requestUrl,
+            attempt: attemptIndex,
+            level: data.level,
+            totalDuration: data.details?.totalduration,
+            live: data.details?.live,
+          });
+        });
+        hls.on(Hls.Events.ERROR, (_event, data) => {
+          if (!data?.fatal) return;
+          console.error("[IPTV][Player] Fatal HLS error", {
+            ...playbackDebugContext,
+            sourceUrl,
+            requestUrl,
+            attempt: attemptIndex,
+            hlsErrorType: data.type,
+            hlsErrorDetails: data.details,
+            hlsErrorFatal: data.fatal,
+            hlsErrorResponseCode: data.response?.code,
+            hlsErrorResponseText: data.response?.text,
+          });
+          if (tryNextAttempt("fatal-hls-error")) return;
+          const message = isTsFallbackCase
+            ? "This provider appears to use MPEG-TS. Browser playback usually requires an HLS (.m3u8) stream."
+            : "HLS playback error. Try retrying this stream.";
+          finalizeError(message);
+        });
+      } else if (mode === "mpegts") {
+        const player = mpegts.createPlayer(
+          {
+            type: "mpegts",
+            url: requestUrl,
+            isLive: item.section === "live",
+            cors: true,
+            withCredentials: false,
+          },
+          {
+            isLive: item.section === "live",
+            // Favor progressive live playback over large prebuffering.
+            enableStashBuffer: false,
+            stashInitialSize: 128 * 1024,
+            lazyLoad: false,
+            deferLoadAfterSourceOpen: false,
+            liveBufferLatencyChasing: true,
+            liveBufferLatencyMaxLatency: 1.0,
+            liveBufferLatencyMinRemain: 0.2,
+            liveSync: item.section === "live",
+            liveSyncMaxLatency: 1.0,
+            liveSyncTargetLatency: 0.4,
+            liveSyncPlaybackRate: 1.2,
+          },
+        );
+        mpegtsRef.current = player;
+        player.attachMediaElement(video);
+        player.load();
+        player.on(mpegts.Events.STATISTICS_INFO, (info: unknown) => {
+          const speed = (info as { speed?: number } | null)?.speed ?? 0;
+          if (autoplay && speed > 0) {
+            // Keep trying while data is actively flowing to MSE.
+            armStartupTimeout();
+          }
+        });
+        if (autoplay) {
+          const started = player.play();
+          if (started && typeof (started as Promise<void>).catch === "function") {
+            void (started as Promise<void>).catch((error: unknown) => {
+              if (isAbortLikeError(error)) return;
+              onErrorRef.current("Autoplay is blocked by browser policy. Press play to start.");
+            });
+          }
+        }
+        player.on(mpegts.Events.ERROR, (errorType: unknown, errorDetails: unknown, errorInfo: unknown) => {
+          console.error("[IPTV][Player] MPEGTS error", {
+            ...playbackDebugContext,
+            sourceUrl,
+            requestUrl,
+            attempt: attemptIndex,
+            errorType,
+            errorDetails,
+            errorInfo,
+          });
+          if (tryNextAttempt("mpegts-error")) return;
+          finalizeError("MPEG-TS playback error. Stream may require provider-specific headers or token handling.");
+        });
+      } else {
+        video.src = requestUrl;
+      }
+      switchingSourceRef.current = false;
+      playCurrent();
+      if (!autoplay) {
+        setLoading(false);
+      }
+    };
+
+    const onErrorEvent = () => {
+      if (switchingSourceRef.current) return;
+      const mediaErr = video.error;
+      console.error("[IPTV][Player] Native video error event", {
+        ...playbackDebugContext,
+        attempt: attemptIndex,
+        sourceUrl: playbackAttempts[attemptIndex]?.url,
+        sourceMode: playbackAttempts[attemptIndex]
+          ? `${modeLabel(playbackAttempts[attemptIndex].mode)}${playbackAttempts[attemptIndex].viaProxy ? "+proxy" : ""}`
+          : "native-video",
+        currentSrc: video.currentSrc,
+        networkState: video.networkState,
+        readyState: video.readyState,
+        mediaErrorCode: mediaErr?.code,
+        mediaErrorName: mediaErrorName(mediaErr?.code),
+        mediaErrorMessage: mediaErr?.message,
+      });
+      if (tryNextAttempt("native-video-error")) return;
+      const message = isTsFallbackCase
+        ? "This stream looks like MPEG-TS and may download instead of playing in browser. Try an HLS (.m3u8) variant from your provider."
+        : "Playback failed. Stream may be unavailable or blocked.";
+      finalizeError(message);
     };
     const onRateChange = () => setPlaybackRate(video.playbackRate);
 
@@ -242,29 +684,10 @@ export const VideoPlayer = ({
     video.addEventListener("error", onErrorEvent);
     video.addEventListener("ratechange", onRateChange);
 
-    if (Hls.isSupported() && item.streamUrl.includes(".m3u8")) {
-      const hls = new Hls();
-      hlsRef.current = hls;
-      hls.loadSource(item.streamUrl);
-      hls.attachMedia(video);
-      hls.on(Hls.Events.ERROR, (_event, data) => {
-        if (!data?.fatal) return;
-        const message = "HLS playback error. Try retrying this stream.";
-        setLocalError(message);
-        onErrorRef.current(message);
-        setLoading(false);
-      });
-    } else {
-      video.src = item.streamUrl;
-    }
-
-    if (autoplay) {
-      void video.play().catch(() => {
-        onErrorRef.current("Autoplay is blocked by browser policy. Press play to start.");
-      });
-    }
+    startCandidate(playbackAttempts[attemptIndex]);
 
     return () => {
+      clearStartupTimer();
       video.removeEventListener("loadedmetadata", onLoadedMetadata);
       video.removeEventListener("loadeddata", onLoadedData);
       video.removeEventListener("durationchange", onDurationChange);
@@ -284,8 +707,9 @@ export const VideoPlayer = ({
         hlsRef.current.destroy();
         hlsRef.current = null;
       }
+      destroyMpegTsPlayer();
     };
-  }, [item, autoplay]);
+  }, [item, autoplay, clearStartupTimer, destroyMpegTsPlayer]);
 
   useEffect(() => {
     const onFsChange = () => {

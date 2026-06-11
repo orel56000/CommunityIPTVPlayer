@@ -1,5 +1,6 @@
 import { Menu, MonitorPlay } from "lucide-react";
 import type { PlaylistItem } from "../../types/models";
+import { GitHubIcon } from "../shared/GitHubIcon";
 
 interface HeaderProps {
   currentItem: PlaylistItem | null;
@@ -37,13 +38,25 @@ export const Header = ({ currentItem, onOpenImport, onToggleSidebar }: HeaderPro
               <span className="text-slate-300">{currentItem.title}</span>
             </>
           ) : (
-            <span>Import an M3U playlist to start watching</span>
+            <span>Import an M3U playlist or Xtream source to start watching</span>
           )}
         </div>
       </div>
-      <button className="btn btn-primary shrink-0 px-4 py-2 text-sm" type="button" onClick={onOpenImport}>
-        Add playlist
-      </button>
+      <div className="flex shrink-0 items-center gap-2">
+        <a
+          className="btn border-white/10 bg-white/[0.04] px-3 py-2 text-sm"
+          href="https://github.com/orel56000/CommunityIPTVPlayer"
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label="Open Community IPTV Player repository"
+          title="Open GitHub repository"
+        >
+          <GitHubIcon className="h-4 w-4 text-slate-200" />
+        </a>
+        <button className="btn btn-primary px-4 py-2 text-sm" type="button" onClick={onOpenImport}>
+          Add playlist
+        </button>
+      </div>
     </div>
   </header>
 );

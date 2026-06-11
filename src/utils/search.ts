@@ -21,8 +21,9 @@ const searchTextCache = new WeakMap<PlaylistItem, string>();
 const buildSearchText = (item: PlaylistItem): string => {
   const cached = searchTextCache.get(item);
   if (cached !== undefined) return cached;
+  const metadataText = Object.values(item.metadata ?? {}).join(" ");
   const text = normalize(
-    `${item.title} ${item.groupTitle ?? ""} ${item.tvgName ?? ""} ${item.seriesTitle ?? ""} ${item.episodeTitle ?? ""} ${item.tvgId ?? ""} ${item.xuiId ?? ""} ${getShareId(item)}`,
+    `${item.title} ${item.groupTitle ?? ""} ${item.tvgName ?? ""} ${item.seriesTitle ?? ""} ${item.episodeTitle ?? ""} ${item.description ?? ""} ${item.tvgId ?? ""} ${item.xuiId ?? ""} ${getShareId(item)} ${metadataText}`,
   );
   searchTextCache.set(item, text);
   return text;

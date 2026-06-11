@@ -9,6 +9,7 @@ interface SeriesBrowserProps {
   series: SeriesItem[];
   activeEpisodeId?: string;
   selectedSeriesId: string | null;
+  loadingSeriesId?: string | null;
   progressByItemId: Map<string, PlaybackProgress>;
   onSelectSeries: (seriesId: string | null) => void;
   onPlayEpisode: (episode: EpisodeItem) => void;
@@ -20,6 +21,7 @@ export const SeriesBrowser = ({
   series,
   activeEpisodeId,
   selectedSeriesId,
+  loadingSeriesId,
   progressByItemId,
   onSelectSeries,
   onPlayEpisode,
@@ -34,6 +36,7 @@ export const SeriesBrowser = ({
       <SeriesDetailView
         show={selectedSeries}
         activeEpisodeId={activeEpisodeId}
+        loading={loadingSeriesId === selectedSeries.id}
         progressByItemId={progressByItemId}
         onPlay={onPlayEpisode}
         onBack={() => onSelectSeries(null)}
@@ -41,15 +44,16 @@ export const SeriesBrowser = ({
     );
   }
 
-  return <SeriesGridView series={series} onOpen={(id) => onSelectSeries(id)} />;
+  return <SeriesGridView series={series} loadingSeriesId={loadingSeriesId} onOpen={(id) => onSelectSeries(id)} />;
 };
 
 interface SeriesGridViewProps {
   series: SeriesItem[];
+  loadingSeriesId?: string | null;
   onOpen: (seriesId: string) => void;
 }
 
-const SeriesGridView = ({ series, onOpen }: SeriesGridViewProps) => {
+const SeriesGridView = ({ series, loadingSeriesId, onOpen }: SeriesGridViewProps) => {
   const { visibleCount, hasMore, sentinelRef } = useInfiniteList(series.length, { initialCount: 40, step: 40 });
   const visible = useMemo(() => series.slice(0, visibleCount), [series, visibleCount]);
 
@@ -85,8 +89,12 @@ const SeriesGridView = ({ series, onOpen }: SeriesGridViewProps) => {
               <div className="space-y-1 p-3">
                 <h4 className="line-clamp-1 text-sm font-semibold text-slate-100">{show.title}</h4>
                 <p className="line-clamp-1 text-xs text-slate-400">
-                  {show.episodes.length} episode{show.episodes.length === 1 ? "" : "s"}
-                  {show.groupTitle ? ` · ${show.groupTitle}` : ""}
+                  {show.episodes.length > 0
+                    ? `${show.episodes.length} episode${show.episodes.length === 1 ? "" : "s"}`
+                    : loadingSeriesId === show.id
+                      ? "Loading episodes..."
+                      : "Open to load episodes"}
+                  {show.groupTitle ? ` - ${show.groupTitle}` : ""}
                 </p>
               </div>
             </button>
@@ -108,12 +116,13 @@ const SeriesGridView = ({ series, onOpen }: SeriesGridViewProps) => {
 interface SeriesDetailViewProps {
   show: SeriesItem;
   activeEpisodeId?: string;
+  loading?: boolean;
   progressByItemId: Map<string, PlaybackProgress>;
   onPlay: (episode: EpisodeItem) => void;
   onBack: () => void;
 }
 
-const SeriesDetailView = ({ show, activeEpisodeId, progressByItemId, onPlay, onBack }: SeriesDetailViewProps) => {
+const SeriesDetailView = ({ show, activeEpisodeId, loading = false, progressByItemId, onPlay, onBack }: SeriesDetailViewProps) => {
   const seasons = useMemo(() => {
     const map = new Map<number, EpisodeItem[]>();
     for (const episode of show.episodes) {
@@ -133,28 +142,25 @@ const SeriesDetailView = ({ show, activeEpisodeId, progressByItemId, onPlay, onB
     return ep ? seasonKey(ep) : null;
   }, [activeEpisodeId, show.episodes]);
 
-  const [activeSeason, setActiveSeason] = useState<number>(() =>
-    activeSeasonFromWatching ?? seasons[0]?.season ?? 0,
-  );
+  const [activeSeason, setActiveSeason] = useState<number>(() => activeSeasonFromWatching ?? seasons[0]?.season ?? 0);
 
   useEffect(() => {
     if (activeSeasonFromWatching != null && activeSeasonFromWatching !== activeSeason) {
       setActiveSeason(activeSeasonFromWatching);
     }
-    // only snap when opening the detail view / switching active episode
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [show.id, activeSeasonFromWatching]);
 
   const currentSeason = useMemo(
-    () => seasons.find((s) => s.season === activeSeason) ?? seasons[0],
+    () => seasons.find((season) => season.season === activeSeason) ?? seasons[0],
     [seasons, activeSeason],
   );
 
   const seasonHasAnyProgress = useMemo(() => {
     if (!currentSeason?.episodes.length) return false;
     return currentSeason.episodes.some((episode) => {
-      const p = progressByItemId.get(episode.id);
-      return Boolean(p?.completed || (p && p.positionSec > 3));
+      const progress = progressByItemId.get(episode.id);
+      return Boolean(progress?.completed || (progress && progress.positionSec > 3));
     });
   }, [currentSeason, progressByItemId]);
 
@@ -169,9 +175,9 @@ const SeriesDetailView = ({ show, activeEpisodeId, progressByItemId, onPlay, onB
   const listRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     const scroller = listRef.current;
-    const el = scrollTargetRef.current;
-    if (!scroller || !el) return;
-    const target = el.offsetTop - scroller.clientHeight / 2 + el.clientHeight / 2;
+    const targetEl = scrollTargetRef.current;
+    if (!scroller || !targetEl) return;
+    const target = targetEl.offsetTop - scroller.clientHeight / 2 + targetEl.clientHeight / 2;
     try {
       scroller.scrollTo({ top: Math.max(0, target), behavior: "smooth" });
     } catch {
@@ -182,8 +188,8 @@ const SeriesDetailView = ({ show, activeEpisodeId, progressByItemId, onPlay, onB
   const firstEpisode = show.episodes[0];
   const nextUnwatched = useMemo(() => {
     for (const episode of show.episodes) {
-      const prog = progressByItemId.get(episode.id);
-      if (!prog?.completed) return episode;
+      const progress = progressByItemId.get(episode.id);
+      if (!progress?.completed) return episode;
     }
     return firstEpisode;
   }, [show.episodes, progressByItemId, firstEpisode]);
@@ -198,9 +204,18 @@ const SeriesDetailView = ({ show, activeEpisodeId, progressByItemId, onPlay, onB
         <div className="min-w-0 flex-1">
           <h2 className="truncate text-lg font-semibold text-slate-100">{show.title}</h2>
           <p className="text-xs text-slate-400">
-            {show.episodes.length} episode{show.episodes.length === 1 ? "" : "s"}
-            {show.groupTitle ? ` · ${show.groupTitle}` : ""}
+            {show.episodes.length > 0
+              ? `${show.episodes.length} episode${show.episodes.length === 1 ? "" : "s"}`
+              : loading
+                ? "Loading episodes..."
+                : "Episodes load when you open the series"}
+            {show.groupTitle ? ` - ${show.groupTitle}` : ""}
           </p>
+          {show.description ? (
+            <p dir="auto" className="mt-2 text-sm leading-6 text-slate-300 [text-align:start]">
+              {show.description}
+            </p>
+          ) : null}
         </div>
         {nextUnwatched ? (
           <button type="button" className="btn btn-primary shrink-0" onClick={() => onPlay(nextUnwatched)}>
@@ -260,82 +275,79 @@ const SeriesDetailView = ({ show, activeEpisodeId, progressByItemId, onPlay, onB
                 ref={listRef}
                 className="max-h-[min(60vh,32rem)] overflow-y-auto rounded-md bg-slate-950/40 pr-1"
               >
-              <ul className="space-y-1 p-1">
-                {currentSeason.episodes.map((episode) => {
-                  const prog = progressByItemId.get(episode.id);
-                  const ratio =
-                    prog && prog.durationSec > 0 ? Math.min(1, prog.positionSec / prog.durationSec) : 0;
-                  const isActive = activeEpisodeId === episode.id;
-                  const isScrollTarget = episode.id === scrollTargetId;
-                  const isSuggestedStart =
-                    !seasonHasAnyProgress && episode.id === currentSeason.episodes[0]?.id;
-                  const isCompleted = Boolean(prog?.completed);
-                  return (
-                    <li
-                      key={episode.id}
-                      ref={isScrollTarget ? scrollTargetRef : undefined}
-                      aria-current={isSuggestedStart ? "true" : undefined}
-                    >
-                      <button
-                        type="button"
-                        onClick={() => onPlay(episode)}
-                        className={clsx(
-                          "flex w-full flex-col gap-1 rounded-md px-3 py-2 text-left text-sm transition",
-                          isActive
-                            ? "bg-cyan-500/20 text-cyan-100 ring-1 ring-cyan-400/50"
-                            : isSuggestedStart
-                              ? "border border-dashed border-slate-500/50 bg-slate-800/80 text-slate-100"
-                              : "bg-slate-900 hover:bg-slate-800",
-                        )}
+                <ul className="space-y-1 p-1">
+                  {currentSeason.episodes.map((episode) => {
+                    const progress = progressByItemId.get(episode.id);
+                    const ratio =
+                      progress && progress.durationSec > 0 ? Math.min(1, progress.positionSec / progress.durationSec) : 0;
+                    const isActive = activeEpisodeId === episode.id;
+                    const isScrollTarget = episode.id === scrollTargetId;
+                    const isSuggestedStart = !seasonHasAnyProgress && episode.id === currentSeason.episodes[0]?.id;
+                    const isCompleted = Boolean(progress?.completed);
+                    return (
+                      <li
+                        key={episode.id}
+                        ref={isScrollTarget ? scrollTargetRef : undefined}
+                        aria-current={isSuggestedStart ? "true" : undefined}
                       >
-                        <div className="flex w-full items-center justify-between gap-2">
-                          <span className="flex min-w-0 items-center gap-2">
-                            {isCompleted ? (
-                              <CheckCircle2
-                                size={14}
-                                className="shrink-0 text-emerald-400"
-                                aria-label="Watched"
-                              />
-                            ) : (
-                              <span
-                                className={clsx(
-                                  "h-1.5 w-1.5 shrink-0 rounded-full",
-                                  ratio > 0 ? "bg-cyan-300" : "bg-slate-700",
-                                )}
-                                aria-hidden
-                              />
-                            )}
-                            <span className="line-clamp-1">
-                              S{episode.season ?? 0}E{episode.episode ?? 0}
-                              {"  "}·{"  "}
-                              {episode.title}
+                        <button
+                          type="button"
+                          onClick={() => onPlay(episode)}
+                          className={clsx(
+                            "flex w-full flex-col gap-1 rounded-md px-3 py-2 text-left text-sm transition",
+                            isActive
+                              ? "bg-cyan-500/20 text-cyan-100 ring-1 ring-cyan-400/50"
+                              : isSuggestedStart
+                                ? "border border-dashed border-slate-500/50 bg-slate-800/80 text-slate-100"
+                                : "bg-slate-900 hover:bg-slate-800",
+                          )}
+                        >
+                          <div className="flex w-full items-center justify-between gap-2">
+                            <span className="flex min-w-0 items-center gap-2">
+                              {isCompleted ? (
+                                <CheckCircle2 size={14} className="shrink-0 text-emerald-400" aria-label="Watched" />
+                              ) : (
+                                <span
+                                  className={clsx(
+                                    "h-1.5 w-1.5 shrink-0 rounded-full",
+                                    ratio > 0 ? "bg-cyan-300" : "bg-slate-700",
+                                  )}
+                                  aria-hidden
+                                />
+                              )}
+                              <span className="line-clamp-1">
+                                S{episode.season ?? 0}E{episode.episode ?? 0}
+                                {"  "} - {"  "}
+                                {episode.title}
+                              </span>
                             </span>
-                          </span>
-                          <span className="flex shrink-0 items-center gap-2 text-[11px] text-slate-400">
-                            {prog?.updatedAt ? <span>{formatShortDate(prog.updatedAt)}</span> : null}
-                            {isActive ? <span className="text-cyan-200">Now playing</span> : null}
-                            {isSuggestedStart && !isActive ? (
-                              <span className="text-slate-500">Start here</span>
-                            ) : null}
-                            <ChevronRight size={14} />
-                          </span>
-                        </div>
-                        {ratio > 0 && !isCompleted ? (
-                          <div className="h-1 w-full overflow-hidden rounded-full bg-slate-800">
-                            <div
-                              className="h-full rounded-full bg-cyan-400"
-                              style={{ width: `${Math.max(2, ratio * 100)}%` }}
-                            />
+                            <span className="flex shrink-0 items-center gap-2 text-[11px] text-slate-400">
+                              {progress?.updatedAt ? <span>{formatShortDate(progress.updatedAt)}</span> : null}
+                              {isActive ? <span className="text-cyan-200">Now playing</span> : null}
+                              {isSuggestedStart && !isActive ? <span className="text-slate-500">Start here</span> : null}
+                              <ChevronRight size={14} />
+                            </span>
                           </div>
-                        ) : null}
-                      </button>
-                    </li>
-                  );
-                })}
-              </ul>
+                          {ratio > 0 && !isCompleted ? (
+                            <div className="h-1 w-full overflow-hidden rounded-full bg-slate-800">
+                              <div
+                                className="h-full rounded-full bg-cyan-400"
+                                style={{ width: `${Math.max(2, ratio * 100)}%` }}
+                              />
+                            </div>
+                          ) : null}
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
               </div>
             </section>
-          ) : null}
+          ) : loading ? (
+            <section className="panel p-4 text-sm text-slate-400">Loading series details...</section>
+          ) : (
+            <section className="panel p-4 text-sm text-slate-400">No episodes loaded for this series yet.</section>
+          )}
         </div>
       </div>
     </div>

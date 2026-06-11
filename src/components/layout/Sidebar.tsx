@@ -1,6 +1,7 @@
 import clsx from "clsx";
 import { Settings } from "lucide-react";
 import type { PlaylistSection, SavedPlaylist } from "../../types/models";
+import { GitHubIcon } from "../shared/GitHubIcon";
 
 interface SidebarProps {
   playlists: SavedPlaylist[];
@@ -119,6 +120,16 @@ export const Sidebar = ({
           <Settings size={16} className="shrink-0 text-slate-400" />
           {!collapsed && <span>Settings</span>}
         </button>
+        <a
+          className={clsx(navBtn(false), "mt-2 flex items-center gap-2")}
+          href="https://github.com/orel56000/CommunityIPTVPlayer"
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label="Open Community IPTV Player repository"
+          title="Open GitHub repository"
+        >
+          <GitHubIcon className="h-4 w-4 shrink-0 text-slate-300" />
+        </a>
       </div>
     </aside>
   </>

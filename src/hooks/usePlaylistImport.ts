@@ -1,7 +1,7 @@
 import { useState } from "react";
-import { parseM3uChunked } from "../utils/parseM3u";
 import type { PlaylistSource, SavedPlaylist } from "../types/models";
 import { now } from "../utils/time";
+import { loadPlaylistSource } from "../utils/loadPlaylistSource";
 
 const createPlaylistId = (): string => `pl-${Math.random().toString(36).slice(2, 10)}`;
 
@@ -27,31 +27,22 @@ export const usePlaylistImport = () => {
     setProgressLabel("Preparing import...");
     try {
       const playlistId = createPlaylistId();
-      let text = fallbackText ?? "";
-      if (source.type === "url") {
-        setProgressLabel("Downloading playlist...");
-        const response = await fetch(source.value);
-        if (!response.ok) {
-          throw new Error(`Failed to fetch playlist (${response.status})`);
-        }
-        text = await response.text();
-      }
-      setProgressLabel("Parsing playlist...");
-      const parsed = await parseM3uChunked(playlistId, text, {
+      const parsed = await loadPlaylistSource(playlistId, source, fallbackText, {
         chunkSize: source.type === "file" ? 2500 : 4000,
         onProgress: setProgress,
+        onStatus: setProgressLabel,
       });
       return {
         playlist: {
           id: playlistId,
           name,
-          source,
+          source: parsed.normalizedSource ?? source,
           lastUpdatedAt: now(),
           importErrors: parsed.errors,
           itemCount: parsed.items.length,
           items: parsed.items,
         },
-        sourceContent: text,
+        sourceContent: parsed.sourceContent,
       };
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to import playlist.");

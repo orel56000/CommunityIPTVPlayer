@@ -6,7 +6,7 @@ import type { PlaylistItem, PlaylistSection, SavedPlaylist } from "./types/model
 import { storage } from "./utils/storage";
 import { getShareId } from "./utils/shareId";
 import { buildEpisodeUrl, buildWatchPath, parseWatchPath } from "./utils/watchUrl";
-import { getGroups, getNextEpisode, groupSeries } from "./utils/grouping";
+import { buildSeriesFromCatalog, getGroups, getNextEpisode, groupSeries } from "./utils/grouping";
 import { useActivePlaylist } from "./hooks/useActivePlaylist";
 import { usePlaylistImport } from "./hooks/usePlaylistImport";
 import { useFavorites } from "./hooks/useFavorites";
@@ -37,9 +37,11 @@ import { InstallAppBanner } from "./components/shared/InstallAppBanner";
 import { DetailsPanel } from "./components/panels/DetailsPanel";
 import { PlayerNavBar } from "./components/player/PlayerNavBar";
 import { now } from "./utils/time";
-import { parseM3u, parseM3uChunked } from "./utils/parseM3u";
 import { playlistDb } from "./utils/indexedDb";
 import { filterByQuery } from "./utils/search";
+import { loadPlaylistSource } from "./utils/loadPlaylistSource";
+import { loadXtreamSeriesEpisodes } from "./utils/xtream";
+import { serializePlaylistItemsToM3u } from "./utils/exportM3u";
 
 const initialFilters: UIFilters = {
   query: "",
@@ -65,6 +67,7 @@ const App = () => {
   const appliedDeepLinkKey = useRef<string | null>(null);
   const [visitRestorePause, setVisitRestorePause] = useState(false);
   const [deepLinkError, setDeepLinkError] = useState<string | null>(null);
+  const [loadingSeriesId, setLoadingSeriesId] = useState<string | null>(null);
 
   const setPlaylists = (playlists: SavedPlaylist[]) => setState((prev) => ({ ...prev, playlists }));
   const setActivePlaylistId = (activePlaylistId: string | null) => setState((prev) => ({ ...prev, activePlaylistId }));
@@ -104,13 +107,7 @@ const App = () => {
               return [playlist.id, items] as const;
             }
             const sourceContent = await playlistDb.loadPlaylistSourceContent(playlist.id);
-            if (!sourceContent) {
-              return [playlist.id, [] as PlaylistItem[]] as const;
-            }
-            const parsed =
-              sourceContent.length > 1_000_000
-                ? await parseM3uChunked(playlist.id, sourceContent)
-                : parseM3u(playlist.id, sourceContent);
+            const parsed = await loadPlaylistSource(playlist.id, playlist.source, sourceContent ?? "");
             if (parsed.items.length > 0) {
               await playlistDb.savePlaylistItems(playlist.id, parsed.items);
             }
@@ -161,6 +158,17 @@ const App = () => {
   const activePlaylist = useActivePlaylist(state.playlists, state.activePlaylistId);
   const playlistItems = useMemo(() => activePlaylist?.items ?? [], [activePlaylist]);
   const groupedSeries = useMemo(() => groupSeries(playlistItems), [playlistItems]);
+  const hasSeriesCatalog = useMemo(
+    () => playlistItems.some((item) => item.section === "series" && item.kind === "series"),
+    [playlistItems],
+  );
+  const buildSeriesViewForItems = useCallback(
+    (items: PlaylistItem[]) =>
+      items.some((item) => item.section === "series" && item.kind === "series")
+        ? buildSeriesFromCatalog(items, items.filter((item) => item.section === "series" && item.kind === "series"))
+        : groupSeries(items),
+    [],
+  );
   const {
     importFromSource,
     loading: importing,
@@ -254,17 +262,19 @@ const App = () => {
   const sectionItems = useMemo(() => {
     switch (state.section) {
       case "live":
-        return playlistItems.filter((item) => item.kind === "live" || item.kind === "unknown");
+        return playlistItems.filter((item) => item.section === "live" && (item.kind === "live" || item.kind === "unknown"));
       case "movies":
-        return playlistItems.filter((item) => item.kind === "movie");
+        return playlistItems.filter((item) => item.section === "movies" && item.kind === "movie");
       case "series":
-        return playlistItems.filter((item) => item.kind === "series_episode");
+        return hasSeriesCatalog
+          ? playlistItems.filter((item) => item.section === "series" && item.kind === "series")
+          : playlistItems.filter((item) => item.section === "series" && item.kind === "series_episode");
       case "catchup":
         return playlistItems.filter((item) => item.section === "catchup");
       default:
         return playlistItems;
     }
-  }, [playlistItems, state.section]);
+  }, [playlistItems, state.section, hasSeriesCatalog]);
   const groups = useMemo(() => getGroups(sectionItems), [sectionItems]);
 
   useEffect(() => {
@@ -283,9 +293,15 @@ const App = () => {
   );
   const filteredItems = usePlaylistFilter(sectionItems, filtersForSearch, favoriteSet);
   const seriesForView = useMemo(
-    () => (state.section === "series" ? groupSeries(filteredItems) : []),
-    [state.section, filteredItems],
+    () =>
+      state.section === "series"
+        ? hasSeriesCatalog
+          ? buildSeriesFromCatalog(playlistItems, filteredItems)
+          : groupSeries(filteredItems)
+        : [],
+    [state.section, hasSeriesCatalog, playlistItems, filteredItems],
   );
+  const allSeriesForPlaylist = useMemo(() => buildSeriesViewForItems(playlistItems), [buildSeriesViewForItems, playlistItems]);
 
   useEffect(() => {
     if (!["live", "movies", "series", "catchup"].includes(state.section)) return;
@@ -430,7 +446,7 @@ const App = () => {
     setActivePlaylistId(playlist.id);
     setSection(item.section);
     if (item.kind === "series_episode") {
-      const grouped = groupSeries(playlist.items);
+      const grouped = buildSeriesViewForItems(playlist.items);
       const show = grouped.find((s) => s.episodes.some((ep) => ep.id === item.id));
       if (show) {
         setFilters((prev) => ({ ...prev, query: "", selectedGroup: "all", favoritesOnly: false }));
@@ -438,9 +454,55 @@ const App = () => {
       }
     }
     handlePlay(item);
-  }, [deepLink, handlePlay, playerState.currentItem, state.playlists, setActivePlaylistId, setSection, setFilters, setSelectedSeriesId]);
+  }, [buildSeriesViewForItems, deepLink, handlePlay, playerState.currentItem, state.playlists, setActivePlaylistId, setSection, setFilters, setSelectedSeriesId]);
 
   const handleToggleFavorite = (item: PlaylistItem) => toggleFavorite(item.playlistId, item.id);
+
+  const ensureSeriesLoaded = useCallback(
+    async (seriesViewId: string) => {
+      if (!activePlaylist || activePlaylist.source.type !== "xtream" || !activePlaylist.source.xtream) return;
+      const seriesItem = activePlaylist.items.find((item) => item.id === seriesViewId && item.kind === "series");
+      if (!seriesItem) return;
+      const seriesId = seriesItem.xuiId ?? seriesItem.sourceId;
+      const hasEpisodes = activePlaylist.items.some(
+        (item) => item.kind === "series_episode" && item.parentSeriesId === seriesId,
+      );
+      if (hasEpisodes) return;
+
+      setLoadingSeriesId(seriesViewId);
+      try {
+        const episodes = await loadXtreamSeriesEpisodes(activePlaylist.id, activePlaylist.source.xtream, seriesItem);
+        setState((prev) => ({
+          ...prev,
+          playlists: prev.playlists.map((playlist) => {
+            if (playlist.id !== activePlaylist.id) return playlist;
+            const withoutPrevious = playlist.items.filter(
+              (item) => !(item.kind === "series_episode" && item.parentSeriesId === seriesId),
+            );
+            const nextItems = [...withoutPrevious, ...episodes];
+            return { ...playlist, items: nextItems, itemCount: nextItems.length, lastUpdatedAt: now() };
+          }),
+        }));
+      } catch (error) {
+        setImportError(error instanceof Error ? error.message : "Failed to load series details.");
+      } finally {
+        setLoadingSeriesId((current) => (current === seriesViewId ? null : current));
+      }
+    },
+    [activePlaylist, setImportError],
+  );
+
+  const handleSelectSeries = useCallback(
+    async (seriesId: string | null) => {
+      if (!seriesId) {
+        setSelectedSeriesId(null);
+        return;
+      }
+      setSelectedSeriesId(seriesId);
+      await ensureSeriesLoaded(seriesId);
+    },
+    [ensureSeriesLoaded],
+  );
 
   const currentNextEpisode = useMemo(() => {
     const current = playerState.currentItem;
@@ -449,7 +511,7 @@ const App = () => {
   }, [groupedSeries, playerState.currentItem]);
 
   const openSeriesForEpisode = (episode: PlaylistItem) => {
-    const show = groupedSeries.find((series) => series.episodes.some((ep) => ep.id === episode.id));
+    const show = allSeriesForPlaylist.find((series) => series.episodes.some((ep) => ep.id === episode.id));
     if (!show) return;
     setFilters((prev) => ({ ...prev, query: "", selectedGroup: "all", favoritesOnly: false }));
     setSelectedSeriesId(show.id);
@@ -463,7 +525,7 @@ const App = () => {
       if (item.kind === "series_episode") {
         const pl = state.playlists.find((p) => p.id === item.playlistId);
         if (!pl) return;
-        const grouped = groupSeries(pl.items);
+        const grouped = buildSeriesViewForItems(pl.items);
         const show = grouped.find((s) => s.episodes.some((ep) => ep.id === item.id));
         if (show) {
           setSelectedSeriesId(show.id);
@@ -473,10 +535,14 @@ const App = () => {
       }
       setSection(item.section as PlaylistSection);
     },
-    [state.activePlaylistId, state.playlists, setActivePlaylistId, setFilters, setSelectedSeriesId, setSection],
+    [buildSeriesViewForItems, state.activePlaylistId, state.playlists, setActivePlaylistId, setFilters, setSelectedSeriesId, setSection],
   );
 
-  const handleImport = async (name: string, source: { type: "url" | "raw" | "file"; value: string; originalName?: string }, text?: string) => {
+  const handleImport = async (
+    name: string,
+    source: SavedPlaylist["source"],
+    text?: string,
+  ) => {
     const payload = await importFromSource(name, source, text);
     if (!payload) return;
     const { playlist, sourceContent } = payload;
@@ -511,22 +577,59 @@ const App = () => {
     setPlaylists(state.playlists.map((playlist) => (playlist.id === playlistId ? { ...playlist, name: newName } : playlist)));
   };
 
+  const downloadPlaylist = async (playlistId: string) => {
+    const playlist = state.playlists.find((value) => value.id === playlistId);
+    if (!playlist) return;
+
+    let sourceContent: string | null = null;
+    try {
+      sourceContent = await playlistDb.loadPlaylistSourceContent(playlist.id);
+    } catch {
+      sourceContent = null;
+    }
+
+    let text = sourceContent && sourceContent.includes("#EXTM3U") ? sourceContent : null;
+    if (!text) {
+      const items = playlist.items.length > 0 ? playlist.items : await playlistDb.loadPlaylistItems(playlist.id);
+      text = serializePlaylistItemsToM3u(items);
+    }
+
+    const blob = new Blob([text], { type: "application/x-mpegURL;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    const safeBaseName =
+      playlist.name
+        .replace(/[<>:"/\\|?*]+/g, "_")
+        .split("")
+        .filter((char) => char.charCodeAt(0) >= 32)
+        .join("")
+        .trim() || "playlist";
+    a.download = `${safeBaseName}.m3u`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   const refreshPlaylist = async (playlistId: string) => {
     const playlist = state.playlists.find((value) => value.id === playlistId);
-    if (!playlist || playlist.source.type !== "url") return;
+    if (!playlist || !["url", "xtream"].includes(playlist.source.type)) return;
     try {
-      const response = await fetch(playlist.source.value);
-      if (!response.ok) throw new Error(`Failed to refresh (${response.status})`);
-      const text = await response.text();
-      const parsed = text.length > 1_000_000 ? await parseM3uChunked(playlist.id, text) : parseM3u(playlist.id, text);
+      const parsed = await loadPlaylistSource(playlist.id, playlist.source);
       await Promise.all([
         playlistDb.savePlaylistItems(playlist.id, parsed.items),
-        playlistDb.savePlaylistSourceContent(playlist.id, text),
+        playlistDb.savePlaylistSourceContent(playlist.id, parsed.sourceContent),
       ]);
       setPlaylists(
         state.playlists.map((entry) =>
           entry.id === playlist.id
-            ? { ...entry, items: parsed.items, itemCount: parsed.items.length, importErrors: parsed.errors, lastUpdatedAt: now() }
+            ? {
+                ...entry,
+                source: parsed.normalizedSource ?? entry.source,
+                items: parsed.items,
+                itemCount: parsed.items.length,
+                importErrors: parsed.errors,
+                lastUpdatedAt: now(),
+              }
             : entry,
         ),
       );
@@ -620,7 +723,7 @@ const App = () => {
       return (
         <EmptyState
           title="No playlist selected"
-          description="Add a playlist by URL, raw text, or file import to browse and play IPTV content."
+          description="Add an M3U playlist or Xtream source to browse live TV, movies, series, and catch-up content."
           action={
             <button className="btn btn-primary" onClick={() => setImportOpen(true)} type="button">
               Import playlist
@@ -657,7 +760,8 @@ const App = () => {
             activeEpisodeId={playerState.currentItem?.id}
             selectedSeriesId={selectedSeriesId}
             progressByItemId={progressByItemId}
-            onSelectSeries={setSelectedSeriesId}
+            loadingSeriesId={loadingSeriesId}
+            onSelectSeries={handleSelectSeries}
             onPlayEpisode={handlePlay}
           />
         );
@@ -814,6 +918,9 @@ const App = () => {
                 activePlaylistId={state.activePlaylistId}
                 onSelect={setActivePlaylistId}
                 onDelete={deletePlaylist}
+                onDownload={(playlistId) => {
+                  void downloadPlaylist(playlistId);
+                }}
                 onRename={renamePlaylist}
                 onRefresh={refreshPlaylist}
               />

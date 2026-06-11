@@ -1,4 +1,4 @@
-import { Pencil, RefreshCw, Trash2 } from "lucide-react";
+import { Download, Pencil, RefreshCw, Trash2 } from "lucide-react";
 import clsx from "clsx";
 import type { SavedPlaylist } from "../../types/models";
 import { formatRelative } from "../../utils/time";
@@ -8,6 +8,7 @@ interface PlaylistManagerProps {
   activePlaylistId: string | null;
   onSelect: (playlistId: string) => void;
   onDelete: (playlistId: string) => void;
+  onDownload: (playlistId: string) => void;
   onRename: (playlistId: string) => void;
   onRefresh: (playlistId: string) => void;
 }
@@ -16,6 +17,7 @@ export const PlaylistManager = ({
   playlists,
   activePlaylistId,
   onDelete,
+  onDownload,
   onRename,
   onSelect,
   onRefresh,
@@ -43,8 +45,16 @@ export const PlaylistManager = ({
           <button className="btn border-white/10 py-1.5 text-xs" type="button" onClick={() => onRename(playlist.id)}>
             <Pencil size={14} /> Rename
           </button>
-          <button className="btn border-white/10 py-1.5 text-xs" type="button" onClick={() => onRefresh(playlist.id)} disabled={playlist.source.type !== "url"}>
-            <RefreshCw size={14} /> Reload URL
+          <button className="btn border-white/10 py-1.5 text-xs" type="button" onClick={() => onDownload(playlist.id)}>
+            <Download size={14} /> Download
+          </button>
+          <button
+            className="btn border-white/10 py-1.5 text-xs"
+            type="button"
+            onClick={() => onRefresh(playlist.id)}
+            disabled={!["url", "xtream"].includes(playlist.source.type)}
+          >
+            <RefreshCw size={14} /> Reload source
           </button>
           <button className="btn border-rose-500/20 bg-rose-500/10 py-1.5 text-xs text-rose-200 hover:bg-rose-500/20" type="button" onClick={() => onDelete(playlist.id)}>
             <Trash2 size={14} /> Delete

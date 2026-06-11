@@ -1,9 +1,17 @@
-export type PlaylistSourceType = "url" | "raw" | "file";
+export type PlaylistSourceType = "url" | "raw" | "file" | "xtream";
+
+export interface XtreamSourceConfig {
+  host: string;
+  username: string;
+  password: string;
+  output?: "ts" | "m3u8";
+}
 
 export interface PlaylistSource {
   type: PlaylistSourceType;
   value: string;
   originalName?: string;
+  xtream?: XtreamSourceConfig;
 }
 
 export type PlaylistSection =
@@ -16,7 +24,7 @@ export type PlaylistSection =
   | "continue"
   | "settings";
 
-export type PlaylistKind = "series_episode" | "movie" | "live" | "unknown";
+export type PlaylistKind = "series" | "series_episode" | "movie" | "live" | "unknown";
 
 export interface ParsedPlaylistItem {
   id: string;
@@ -36,6 +44,11 @@ export interface PlaylistItem extends ParsedPlaylistItem {
   playlistId: string;
   title: string;
   streamUrl: string;
+  backdrop?: string;
+  description?: string;
+  rating?: string;
+  releaseDate?: string;
+  epgChannelId?: string;
   tvgChno?: string;
   catchup?: string;
   catchupDays?: string;
@@ -43,6 +56,7 @@ export interface PlaylistItem extends ParsedPlaylistItem {
   duration: number | null;
   section: "live" | "movies" | "series" | "catchup";
   seriesTitle?: string;
+  parentSeriesId?: string;
   season?: number;
   episode?: number;
   episodeTitle?: string;
@@ -107,6 +121,10 @@ export interface SeriesItem {
   title: string;
   groupTitle?: string;
   logo?: string;
+  backdrop?: string;
+  description?: string;
+  rating?: string;
+  releaseDate?: string;
   episodes: EpisodeItem[];
 }
 

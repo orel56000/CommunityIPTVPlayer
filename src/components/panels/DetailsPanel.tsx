@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Check, Copy, ListVideo, Tv2 } from "lucide-react";
 import type { PlaylistItem } from "../../types/models";
 import { formatDuration } from "../../utils/time";
@@ -17,6 +17,24 @@ export const DetailsPanel = ({ item, resumeAt, episodePageUrl = null, onGoToBrow
   const [copied, setCopied] = useState(false);
   const [copiedLink, setCopiedLink] = useState(false);
   const [streamUrlVisible, setStreamUrlVisible] = useState(false);
+  const metadataEntries = useMemo(() => {
+    if (!item) return [];
+    const hiddenKeys = new Set([
+      "name",
+      "title",
+      "stream_icon",
+      "cover",
+      "plot",
+      "description",
+      "rating",
+      "releaseDate",
+      "year",
+      "category_id",
+    ]);
+    return Object.entries(item.metadata ?? {})
+      .filter(([key, value]) => !hiddenKeys.has(key) && value.trim().length > 0 && value.length < 180)
+      .slice(0, 8);
+  }, [item]);
 
   useEffect(() => {
     setStreamUrlVisible(false);
@@ -45,6 +63,11 @@ export const DetailsPanel = ({ item, resumeAt, episodePageUrl = null, onGoToBrow
 
   const shareId = item ? getShareId(item) : "";
   const isSeriesEpisode = Boolean(item && (item.kind === "series_episode" || item.section === "series"));
+  const artwork = item ? item.backdrop ?? item.logo : undefined;
+  const humanizeKey = (key: string): string =>
+    key
+      .replace(/[_-]+/g, " ")
+      .replace(/\b\w/g, (match) => match.toUpperCase());
 
   return (
     <aside className="panel h-fit space-y-4 p-4 lg:p-5">
@@ -52,6 +75,14 @@ export const DetailsPanel = ({ item, resumeAt, episodePageUrl = null, onGoToBrow
       {!item ? <p className="text-sm text-slate-500">Select an item to inspect metadata.</p> : null}
       {item ? (
         <>
+          {artwork ? (
+            <img
+              src={artwork}
+              alt={item.title}
+              className="aspect-video w-full rounded-xl border border-white/[0.06] bg-slate-950 object-cover"
+              loading="lazy"
+            />
+          ) : null}
           <div>
             <div className="flex items-start justify-between gap-2">
               <p className="text-[10px] font-semibold uppercase tracking-widest text-slate-500">Title</p>
@@ -122,6 +153,30 @@ export const DetailsPanel = ({ item, resumeAt, episodePageUrl = null, onGoToBrow
             <p className="text-[10px] font-semibold uppercase tracking-widest text-slate-500">Category</p>
             <p className="mt-0.5 text-sm text-slate-200">{item.groupTitle ?? "Ungrouped"}</p>
           </div>
+          {item.description ? (
+            <div>
+              <p className="text-[10px] font-semibold uppercase tracking-widest text-slate-500">Overview</p>
+              <p dir="auto" className="mt-0.5 text-sm leading-6 text-slate-300 [text-align:start]">
+                {item.description}
+              </p>
+            </div>
+          ) : null}
+          {(item.rating || item.releaseDate) ? (
+            <div className="grid grid-cols-2 gap-3">
+              {item.rating ? (
+                <div>
+                  <p className="text-[10px] font-semibold uppercase tracking-widest text-slate-500">Rating</p>
+                  <p className="mt-0.5 text-sm text-slate-200">{item.rating}</p>
+                </div>
+              ) : null}
+              {item.releaseDate ? (
+                <div>
+                  <p className="text-[10px] font-semibold uppercase tracking-widest text-slate-500">Released</p>
+                  <p className="mt-0.5 text-sm text-slate-200">{item.releaseDate}</p>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
           <div>
             <p className="text-[10px] font-semibold uppercase tracking-widest text-slate-500">Section</p>
             <p className="mt-0.5 text-sm capitalize text-slate-200">{item.section}</p>
@@ -155,6 +210,19 @@ export const DetailsPanel = ({ item, resumeAt, episodePageUrl = null, onGoToBrow
             )}
             <p className="mt-1 text-[11px] text-slate-500">Hidden until you choose to reveal it.</p>
           </div>
+          {metadataEntries.length ? (
+            <div>
+              <p className="text-[10px] font-semibold uppercase tracking-widest text-slate-500">Metadata</p>
+              <dl className="mt-2 space-y-2">
+                {metadataEntries.map(([key, value]) => (
+                  <div key={key}>
+                    <dt className="text-[10px] font-semibold uppercase tracking-widest text-slate-500">{humanizeKey(key)}</dt>
+                    <dd className="mt-0.5 text-sm text-slate-300">{value}</dd>
+                  </div>
+                ))}
+              </dl>
+            </div>
+          ) : null}
         </>
       ) : null}
     </aside>

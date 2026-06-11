@@ -17,7 +17,7 @@ export const getGroups = (items: PlaylistItem[]): string[] => {
   return out;
 };
 
-const compareEpisodes = (a: EpisodeItem, b: EpisodeItem): number => {
+export const compareEpisodes = (a: EpisodeItem, b: EpisodeItem): number => {
   const seasonA = a.season ?? 0;
   const seasonB = b.season ?? 0;
   if (seasonA !== seasonB) return seasonA - seasonB;
@@ -25,6 +25,26 @@ const compareEpisodes = (a: EpisodeItem, b: EpisodeItem): number => {
   const episodeB = b.episode ?? 0;
   if (episodeA !== episodeB) return episodeA - episodeB;
   return a.title.localeCompare(b.title);
+};
+
+export const buildSeriesFromCatalog = (allItems: PlaylistItem[], catalogItems: PlaylistItem[]): SeriesItem[] => {
+  const episodes = allItems.filter((item): item is EpisodeItem => item.kind === "series_episode");
+  return catalogItems
+    .filter((item) => item.kind === "series")
+    .map((item) => ({
+      id: item.id,
+      title: item.title,
+      groupTitle: item.groupTitle,
+      logo: item.logo,
+      backdrop: item.backdrop,
+      description: item.description,
+      rating: item.rating,
+      releaseDate: item.releaseDate,
+      episodes: episodes
+        .filter((episode) => episode.parentSeriesId && episode.parentSeriesId === (item.xuiId ?? item.sourceId))
+        .sort(compareEpisodes),
+    }))
+    .sort((a, b) => a.title.localeCompare(b.title));
 };
 
 export const groupSeries = (items: PlaylistItem[]): SeriesItem[] => {
@@ -42,6 +62,10 @@ export const groupSeries = (items: PlaylistItem[]): SeriesItem[] => {
       title,
       groupTitle: episodes[0]?.groupTitle,
       logo: episodes[0]?.logo,
+      backdrop: episodes[0]?.backdrop,
+      description: episodes.find((episode) => episode.description)?.description,
+      rating: episodes.find((episode) => episode.rating)?.rating,
+      releaseDate: episodes.find((episode) => episode.releaseDate)?.releaseDate,
       episodes: [...episodes].sort(compareEpisodes),
     }))
     .sort((a, b) => a.title.localeCompare(b.title));

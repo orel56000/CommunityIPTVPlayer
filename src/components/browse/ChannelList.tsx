@@ -43,7 +43,10 @@ export const ChannelList = ({ channels, activeItemId, favoriteSet, onPlay, onTog
             )}
             <button type="button" className="min-w-0 flex-1 text-left" onClick={() => onPlay(channel)}>
               <p className="line-clamp-1 text-sm font-medium text-slate-100">{channel.title}</p>
-              <p className="line-clamp-1 text-xs text-slate-500">{channel.groupTitle ?? "Ungrouped"}</p>
+              <p className="line-clamp-1 text-xs text-slate-500">
+                {channel.groupTitle ?? "Ungrouped"}
+                {channel.catchupDays ? ` · Catch-up ${channel.catchupDays}d` : ""}
+              </p>
             </button>
             <button className="btn shrink-0 border-white/10 px-2.5 py-2" type="button" onClick={() => onToggleFavorite(channel)}>
               <Star size={14} className={favoriteSet.has(channel.id) ? "fill-amber-300 text-amber-300" : ""} />

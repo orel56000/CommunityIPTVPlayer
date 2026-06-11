@@ -2,6 +2,27 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { PlaylistItem } from "../types/models";
 
 const DEFAULT_RECEIVER = "CC1AD845";
+const FALLBACK_CAST_STATE = {
+  NOT_CONNECTED: "NOT_CONNECTED" as cast.framework.CastState,
+  CONNECTED: "CONNECTED" as cast.framework.CastState,
+  NO_DEVICES_AVAILABLE: "NO_DEVICES_AVAILABLE" as cast.framework.CastState,
+};
+
+const getCastFramework = (): typeof cast.framework | null =>
+  typeof window === "undefined" ? null : window.cast?.framework ?? null;
+
+const getCastStates = (): typeof cast.framework.CastState | typeof FALLBACK_CAST_STATE =>
+  getCastFramework()?.CastState ?? FALLBACK_CAST_STATE;
+
+const getCastContext = (): cast.framework.CastContext | null => {
+  const framework = getCastFramework();
+  if (!framework?.CastContext) return null;
+  try {
+    return framework.CastContext.getInstance();
+  } catch {
+    return null;
+  }
+};
 
 const contentTypeForUrl = (url: string): string =>
   url.includes(".m3u8") ? "application/x-mpegURL" : "video/mp4";
@@ -58,12 +79,7 @@ export const useChromecast = (
 
   const [sdkReady, setSdkReady] = useState(false);
   const [castState, setCastState] = useState<cast.framework.CastState>(() => {
-    if (typeof window === "undefined") return cast.framework.CastState.NOT_CONNECTED;
-    try {
-      return cast.framework.CastContext.getInstance().getCastState();
-    } catch {
-      return cast.framework.CastState.NOT_CONNECTED;
-    }
+    return getCastContext()?.getCastState() ?? getCastStates().NOT_CONNECTED;
   });
   const [mirror, setMirror] = useState<CastMirrorState>(emptyMirror);
   const [deviceName, setDeviceName] = useState<string | null>(null);
@@ -75,29 +91,22 @@ export const useChromecast = (
   const mirrorHandlerRef = useRef<(() => void) | null>(null);
 
   const refreshCastContext = useCallback(() => {
-    if (typeof window === "undefined" || !window.cast?.framework?.CastContext) return;
-    try {
-      const ctx = cast.framework.CastContext.getInstance();
-      setCastState(ctx.getCastState());
-      const session = ctx.getCurrentSession();
-      setDeviceName(session?.getCastDevice()?.friendlyName ?? null);
-    } catch {
-      /* framework not ready */
-    }
+    const ctx = getCastContext();
+    if (!ctx) return;
+    setCastState(ctx.getCastState());
+    const session = ctx.getCurrentSession();
+    setDeviceName(session?.getCastDevice()?.friendlyName ?? null);
   }, []);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
 
     const tryArm = (): boolean => {
-      if (!window.cast?.framework?.CastContext) return false;
-      try {
-        cast.framework.CastContext.getInstance().getCastState();
-        setSdkReady(true);
-        refreshCastContext();
-      } catch {
-        return false;
-      }
+      const ctx = getCastContext();
+      if (!ctx) return false;
+      ctx.getCastState();
+      setSdkReady(true);
+      refreshCastContext();
       return true;
     };
 
@@ -107,8 +116,9 @@ export const useChromecast = (
     window.__onGCastApiAvailable = (isAvailable: boolean, reason?: string) => {
       prev?.(isAvailable, reason);
       if (isAvailable) {
+        const ctx = getCastContext();
         try {
-          const ctx = cast.framework.CastContext.getInstance();
+          if (!ctx) throw new Error("CastContext unavailable");
           ctx.setOptions({
             receiverApplicationId: chrome.cast.media?.DEFAULT_MEDIA_RECEIVER_APP_ID ?? DEFAULT_RECEIVER,
             autoJoinPolicy: chrome.cast.AutoJoinPolicy.ORIGIN_SCOPED,
@@ -131,7 +141,9 @@ export const useChromecast = (
 
   useEffect(() => {
     if (!sdkReady) return;
-    const ctx = cast.framework.CastContext.getInstance();
+    const ctx = getCastContext();
+    const framework = getCastFramework();
+    if (!ctx || !framework) return;
 
     const onCastState = () => {
       refreshCastContext();
@@ -139,18 +151,20 @@ export const useChromecast = (
       setDeviceName(session?.getCastDevice()?.friendlyName ?? null);
     };
 
-    ctx.addEventListener(cast.framework.CastContextEventType.CAST_STATE_CHANGED, onCastState);
-    ctx.addEventListener(cast.framework.CastContextEventType.SESSION_STATE_CHANGED, onCastState);
+    ctx.addEventListener(framework.CastContextEventType.CAST_STATE_CHANGED, onCastState);
+    ctx.addEventListener(framework.CastContextEventType.SESSION_STATE_CHANGED, onCastState);
     return () => {
-      ctx.removeEventListener(cast.framework.CastContextEventType.CAST_STATE_CHANGED, onCastState);
-      ctx.removeEventListener(cast.framework.CastContextEventType.SESSION_STATE_CHANGED, onCastState);
+      ctx.removeEventListener(framework.CastContextEventType.CAST_STATE_CHANGED, onCastState);
+      ctx.removeEventListener(framework.CastContextEventType.SESSION_STATE_CHANGED, onCastState);
     };
   }, [sdkReady, refreshCastContext]);
 
   const attachRemotePlayer = useCallback(() => {
     if (remotePlayerRef.current && remoteControllerRef.current) return;
-    const rp = new cast.framework.RemotePlayer();
-    const rpc = new cast.framework.RemotePlayerController(rp);
+    const framework = getCastFramework();
+    if (!framework) return;
+    const rp = new framework.RemotePlayer();
+    const rpc = new framework.RemotePlayerController(rp);
     remotePlayerRef.current = rp;
     remoteControllerRef.current = rpc;
 
@@ -167,15 +181,16 @@ export const useChromecast = (
       }
     };
     mirrorHandlerRef.current = handler;
-    rpc.addEventListener(cast.framework.RemotePlayerEventType.ANY_CHANGE, handler);
+    rpc.addEventListener(framework.RemotePlayerEventType.ANY_CHANGE, handler);
     handler();
   }, []);
 
   const detachRemotePlayer = useCallback(() => {
     const rpc = remoteControllerRef.current;
     const h = mirrorHandlerRef.current;
-    if (rpc && h) {
-      rpc.removeEventListener(cast.framework.RemotePlayerEventType.ANY_CHANGE, h);
+    const framework = getCastFramework();
+    if (rpc && h && framework) {
+      rpc.removeEventListener(framework.RemotePlayerEventType.ANY_CHANGE, h);
     }
     mirrorHandlerRef.current = null;
     remoteControllerRef.current = null;
@@ -185,7 +200,7 @@ export const useChromecast = (
 
   useEffect(() => {
     if (!sdkReady) return;
-    if (castState !== cast.framework.CastState.CONNECTED) {
+    if (castState !== getCastStates().CONNECTED) {
       detachRemotePlayer();
       return;
     }
@@ -193,12 +208,12 @@ export const useChromecast = (
     return () => detachRemotePlayer();
   }, [sdkReady, castState, attachRemotePlayer, detachRemotePlayer]);
 
-  const isCasting = castState === cast.framework.CastState.CONNECTED;
+  const isCasting = castState === getCastStates().CONNECTED;
 
   useEffect(() => {
     if (!sdkReady || !isCasting) return;
     const current = itemRef.current;
-    const session = cast.framework.CastContext.getInstance().getCurrentSession();
+    const session = getCastContext()?.getCurrentSession();
     if (!session || !current) return;
     let cancelled = false;
     void (async () => {
@@ -216,7 +231,11 @@ export const useChromecast = (
     const current = itemRef.current;
     if (!sdkReady || !current) return;
     setCastMessage(null);
-    const ctx = cast.framework.CastContext.getInstance();
+    const ctx = getCastContext();
+    if (!ctx) {
+      setCastMessage("Cast is not available in this browser yet.");
+      return;
+    }
     try {
       const err = await ctx.requestSession();
       if (err) {
@@ -236,7 +255,7 @@ export const useChromecast = (
 
   const stopCasting = useCallback(() => {
     if (!sdkReady) return;
-    cast.framework.CastContext.getInstance().endCurrentSession(true);
+    getCastContext()?.endCurrentSession(true);
     setCastMessage(null);
     setDeviceName(null);
   }, [sdkReady]);
@@ -271,7 +290,7 @@ export const useChromecast = (
   const canCast =
     typeof chrome !== "undefined" &&
     sdkReady &&
-    (isCasting || castState !== cast.framework.CastState.NO_DEVICES_AVAILABLE);
+    (isCasting || castState !== getCastStates().NO_DEVICES_AVAILABLE);
 
   return {
     sdkReady,

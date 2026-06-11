@@ -26,6 +26,10 @@ export const PlaylistImportModal = ({
   const [rawText, setRawText] = useState("");
   const [fileName, setFileName] = useState("");
   const [fileText, setFileText] = useState("");
+  const [xtreamHost, setXtreamHost] = useState("");
+  const [xtreamUsername, setXtreamUsername] = useState("");
+  const [xtreamPassword, setXtreamPassword] = useState("");
+  const [xtreamOutput, setXtreamOutput] = useState<"ts" | "m3u8">("m3u8");
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   if (!open) return null;
@@ -52,6 +56,19 @@ export const PlaylistImportModal = ({
       await onSubmit(trimmedName, { type: "raw", value: "inline" }, rawText);
       return;
     }
+    if (sourceType === "xtream") {
+      await onSubmit(trimmedName, {
+        type: "xtream",
+        value: xtreamHost.trim(),
+        xtream: {
+          host: xtreamHost.trim().replace(/\/+$/, ""),
+          username: xtreamUsername.trim(),
+          password: xtreamPassword,
+          output: xtreamOutput,
+        },
+      });
+      return;
+    }
     await onSubmit(trimmedName, { type: "file", value: fileName || "playlist.m3u", originalName: fileName }, fileText);
   };
 
@@ -75,9 +92,20 @@ export const PlaylistImportModal = ({
           <button className={`btn ${sourceType === "file" ? "btn-primary" : ""}`} onClick={() => setSourceType("file")} type="button">
             File
           </button>
+          <button className={`btn ${sourceType === "xtream" ? "btn-primary" : ""}`} onClick={() => setSourceType("xtream")} type="button">
+            Xtream
+          </button>
         </div>
         {sourceType === "url" ? (
-          <input className="input" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://example.com/playlist.m3u" />
+          <div className="space-y-2">
+            <input
+              className="input"
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+              placeholder="https://example.com/playlist.m3u or .../player_api.php?username=...&password=..."
+            />
+            <p className="text-xs text-slate-500">`player_api.php` URLs are auto-detected and imported with the richer Xtream API flow.</p>
+          </div>
         ) : null}
         {sourceType === "raw" ? (
           <textarea
@@ -110,6 +138,47 @@ export const PlaylistImportModal = ({
                 if (file) await handleFile(file);
               }}
             />
+          </div>
+        ) : null}
+        {sourceType === "xtream" ? (
+          <div className="grid gap-3 md:grid-cols-2">
+            <label className="space-y-1">
+              <span className="text-xs text-slate-400">Host</span>
+              <input
+                className="input"
+                value={xtreamHost}
+                onChange={(e) => setXtreamHost(e.target.value)}
+                placeholder="https://provider.example:8080"
+              />
+            </label>
+            <label className="space-y-1">
+              <span className="text-xs text-slate-400">Username</span>
+              <input className="input" value={xtreamUsername} onChange={(e) => setXtreamUsername(e.target.value)} placeholder="username" />
+            </label>
+            <label className="space-y-1">
+              <span className="text-xs text-slate-400">Password</span>
+              <input
+                className="input"
+                type="password"
+                value={xtreamPassword}
+                onChange={(e) => setXtreamPassword(e.target.value)}
+                placeholder="password"
+              />
+            </label>
+            <label className="space-y-1">
+              <span className="text-xs text-slate-400">Live output</span>
+              <select
+                className="input"
+                value={xtreamOutput}
+                onChange={(e) => setXtreamOutput(e.target.value === "ts" ? "ts" : "m3u8")}
+              >
+                <option value="m3u8">HLS (.m3u8)</option>
+                <option value="ts">MPEG-TS (.ts)</option>
+              </select>
+            </label>
+            <p className="md:col-span-2 text-xs text-slate-500">
+              Uses `player_api.php` for categories, live channels, VOD, series, catch-up flags, and artwork.
+            </p>
           </div>
         ) : null}
         {error ? <p className="text-sm text-rose-300">{error}</p> : null}

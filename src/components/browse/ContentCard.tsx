@@ -23,6 +23,11 @@ export const ContentCard = ({ item, isFavorite, isActive, onPlay, onToggleFavori
       <div className="space-y-1 p-3.5">
         <h4 className="line-clamp-1 text-sm font-semibold tracking-tight text-slate-100">{item.title}</h4>
         <p className="line-clamp-1 text-xs text-slate-500">{item.groupTitle ?? "Ungrouped"}</p>
+        {item.rating || item.releaseDate ? (
+          <p className="line-clamp-1 text-xs text-slate-400">
+            {[item.rating ? `Rating ${item.rating}` : null, item.releaseDate].filter(Boolean).join(" · ")}
+          </p>
+        ) : null}
       </div>
     </button>
     <div className="px-3.5 pb-3.5">
