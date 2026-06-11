@@ -19,14 +19,14 @@ export const ContentGrid = ({ items, favoriteSet, activeItemId, onPlay, onToggle
     <div className="space-y-3">
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
         {visibleItems.map((item) => (
-      <ContentCard
-        key={item.id}
-        item={item}
-        isActive={item.id === activeItemId}
-        isFavorite={favoriteSet.has(item.id)}
-        onPlay={() => onPlay(item)}
-        onToggleFavorite={() => onToggleFavorite(item)}
-      />
+          <ContentCard
+            key={item.id}
+            item={item}
+            isActive={item.id === activeItemId}
+            isFavorite={favoriteSet.has(item.id)}
+            onPlay={() => onPlay(item)}
+            onToggleFavorite={() => onToggleFavorite(item)}
+          />
         ))}
       </div>
       {hasMore ? (

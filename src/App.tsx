@@ -304,6 +304,29 @@ const App = () => {
     [state.section, hasSeriesCatalog, playlistItems, filteredItems],
   );
   const allSeriesForPlaylist = useMemo(() => buildSeriesViewForItems(playlistItems), [buildSeriesViewForItems, playlistItems]);
+  const seriesFavoriteItemById = useMemo(() => {
+    const map = new Map<string, PlaylistItem>();
+    for (const show of allSeriesForPlaylist) {
+      const directItem = playlistItems.find((item) => item.id === show.id && item.section === "series");
+      if (directItem) {
+        map.set(show.id, directItem);
+        continue;
+      }
+      const firstEpisode = show.episodes[0];
+      if (firstEpisode) {
+        const episodeItem = playlistItems.find((item) => item.id === firstEpisode.id);
+        if (episodeItem) map.set(show.id, episodeItem);
+      }
+    }
+    return map;
+  }, [allSeriesForPlaylist, playlistItems]);
+  const favoriteSeriesIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const [seriesId, item] of seriesFavoriteItemById.entries()) {
+      if (favoriteSet.has(item.id)) ids.add(seriesId);
+    }
+    return ids;
+  }, [seriesFavoriteItemById, favoriteSet]);
 
   useEffect(() => {
     if (!["live", "movies", "series", "catchup"].includes(state.section)) return;
@@ -394,13 +417,6 @@ const App = () => {
     }
   }, [state.section, filteredItems.length, filteredFavoritesItems.length, filteredRecentsItems.length, filteredContinueItems.length]);
 
-  const handlePlay = useCallback((item: PlaylistItem) => {
-    setVisitRestorePause(false);
-    setCurrentItem(item);
-    setLastPlayedId(item.id);
-    pushRecent(item.playlistId, item.id);
-  }, [pushRecent, setCurrentItem, setLastPlayedId]);
-
   useEffect(() => {
     if (!deepLink) return;
     const { playlistName, shareId } = deepLink;
@@ -455,10 +471,21 @@ const App = () => {
         setSelectedSeriesId(show.id);
       }
     }
-    handlePlay(item);
-  }, [buildSeriesViewForItems, deepLink, handlePlay, playerState.currentItem, state.playlists, setActivePlaylistId, setSection, setFilters, setSelectedSeriesId]);
+    setVisitRestorePause(false);
+    setCurrentItem(item);
+    setLastPlayedId(item.id);
+    pushRecent(item.playlistId, item.id);
+  }, [buildSeriesViewForItems, deepLink, playerState.currentItem, pushRecent, setActivePlaylistId, setCurrentItem, setFilters, setLastPlayedId, setSection, setSelectedSeriesId, state.playlists]);
 
   const handleToggleFavorite = (item: PlaylistItem) => toggleFavorite(item.playlistId, item.id);
+  const handleToggleFavoriteSeries = useCallback(
+    (seriesId: string) => {
+      const item = seriesFavoriteItemById.get(seriesId);
+      if (!item) return;
+      toggleFavorite(item.playlistId, item.id);
+    },
+    [seriesFavoriteItemById, toggleFavorite],
+  );
 
   const ensureSeriesLoaded = useCallback(
     async (seriesViewId: string) => {
@@ -493,6 +520,22 @@ const App = () => {
     },
     [activePlaylist, setImportError],
   );
+
+  const handlePlay = useCallback((item: PlaylistItem) => {
+    if (item.kind === "series") {
+      setVisitRestorePause(false);
+      if (item.playlistId !== state.activePlaylistId) setActivePlaylistId(item.playlistId);
+      setFilters((prev) => ({ ...prev, query: "", selectedGroup: "all", favoritesOnly: false }));
+      setSelectedSeriesId(item.id);
+      setSection("series");
+      void ensureSeriesLoaded(item.id);
+      return;
+    }
+    setVisitRestorePause(false);
+    setCurrentItem(item);
+    setLastPlayedId(item.id);
+    pushRecent(item.playlistId, item.id);
+  }, [ensureSeriesLoaded, pushRecent, setActivePlaylistId, setCurrentItem, setFilters, setLastPlayedId, setSection, state.activePlaylistId]);
 
   const handleSelectSeries = useCallback(
     async (seriesId: string | null) => {
@@ -763,7 +806,9 @@ const App = () => {
             selectedSeriesId={selectedSeriesId}
             progressByItemId={progressByItemId}
             loadingSeriesId={loadingSeriesId}
+            favoriteSeriesIds={favoriteSeriesIds}
             onSelectSeries={handleSelectSeries}
+            onToggleFavoriteSeries={handleToggleFavoriteSeries}
             onPlayEpisode={handlePlay}
           />
         );

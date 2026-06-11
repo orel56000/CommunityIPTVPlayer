@@ -15,7 +15,7 @@ export const FavoritesView = ({ items, activeItemId, favoriteSet, onPlay, onTogg
     return (
       <EmptyState
         title="No favorites yet"
-        description="Favorite channels, movies, or episodes to keep quick access in this section."
+        description="Favorite channels, movies, series titles, or episodes to keep quick access in this section."
       />
     );
   }

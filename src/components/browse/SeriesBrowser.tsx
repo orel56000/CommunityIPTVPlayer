@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, CheckCircle2, ChevronRight, Play } from "lucide-react";
+import { ArrowLeft, CheckCircle2, ChevronRight, Play, Star } from "lucide-react";
 import clsx from "clsx";
 import type { EpisodeItem, PlaybackProgress, SeriesItem } from "../../types/models";
 import { useInfiniteList } from "../../hooks/useInfiniteList";
@@ -10,8 +10,10 @@ interface SeriesBrowserProps {
   activeEpisodeId?: string;
   selectedSeriesId: string | null;
   loadingSeriesId?: string | null;
+  favoriteSeriesIds: Set<string>;
   progressByItemId: Map<string, PlaybackProgress>;
   onSelectSeries: (seriesId: string | null) => void;
+  onToggleFavoriteSeries: (seriesId: string) => void;
   onPlayEpisode: (episode: EpisodeItem) => void;
 }
 
@@ -22,8 +24,10 @@ export const SeriesBrowser = ({
   activeEpisodeId,
   selectedSeriesId,
   loadingSeriesId,
+  favoriteSeriesIds,
   progressByItemId,
   onSelectSeries,
+  onToggleFavoriteSeries,
   onPlayEpisode,
 }: SeriesBrowserProps) => {
   const selectedSeries = useMemo(
@@ -37,23 +41,35 @@ export const SeriesBrowser = ({
         show={selectedSeries}
         activeEpisodeId={activeEpisodeId}
         loading={loadingSeriesId === selectedSeries.id}
+        isFavorite={favoriteSeriesIds.has(selectedSeries.id)}
         progressByItemId={progressByItemId}
         onPlay={onPlayEpisode}
         onBack={() => onSelectSeries(null)}
+        onToggleFavorite={() => onToggleFavoriteSeries(selectedSeries.id)}
       />
     );
   }
 
-  return <SeriesGridView series={series} loadingSeriesId={loadingSeriesId} onOpen={(id) => onSelectSeries(id)} />;
+  return (
+    <SeriesGridView
+      series={series}
+      loadingSeriesId={loadingSeriesId}
+      favoriteSeriesIds={favoriteSeriesIds}
+      onOpen={(id) => onSelectSeries(id)}
+      onToggleFavorite={onToggleFavoriteSeries}
+    />
+  );
 };
 
 interface SeriesGridViewProps {
   series: SeriesItem[];
   loadingSeriesId?: string | null;
+  favoriteSeriesIds: Set<string>;
   onOpen: (seriesId: string) => void;
+  onToggleFavorite: (seriesId: string) => void;
 }
 
-const SeriesGridView = ({ series, loadingSeriesId, onOpen }: SeriesGridViewProps) => {
+const SeriesGridView = ({ series, loadingSeriesId, favoriteSeriesIds, onOpen, onToggleFavorite }: SeriesGridViewProps) => {
   const { visibleCount, hasMore, sentinelRef } = useInfiniteList(series.length, { initialCount: 40, step: 40 });
   const visible = useMemo(() => series.slice(0, visibleCount), [series, visibleCount]);
 
@@ -98,6 +114,16 @@ const SeriesGridView = ({ series, loadingSeriesId, onOpen }: SeriesGridViewProps
                 </p>
               </div>
             </button>
+            <div className="px-3 pb-3">
+              <button
+                type="button"
+                className="btn w-full justify-center border-white/[0.06] py-2 text-xs"
+                onClick={() => onToggleFavorite(show.id)}
+              >
+                <Star size={14} className={favoriteSeriesIds.has(show.id) ? "fill-amber-300 text-amber-300" : ""} />
+                {favoriteSeriesIds.has(show.id) ? "Unfavorite" : "Favorite"}
+              </button>
+            </div>
           </article>
         ))}
       </div>
@@ -117,12 +143,23 @@ interface SeriesDetailViewProps {
   show: SeriesItem;
   activeEpisodeId?: string;
   loading?: boolean;
+  isFavorite: boolean;
   progressByItemId: Map<string, PlaybackProgress>;
   onPlay: (episode: EpisodeItem) => void;
   onBack: () => void;
+  onToggleFavorite: () => void;
 }
 
-const SeriesDetailView = ({ show, activeEpisodeId, loading = false, progressByItemId, onPlay, onBack }: SeriesDetailViewProps) => {
+const SeriesDetailView = ({
+  show,
+  activeEpisodeId,
+  loading = false,
+  isFavorite,
+  progressByItemId,
+  onPlay,
+  onBack,
+  onToggleFavorite,
+}: SeriesDetailViewProps) => {
   const seasons = useMemo(() => {
     const map = new Map<number, EpisodeItem[]>();
     for (const episode of show.episodes) {
@@ -217,6 +254,10 @@ const SeriesDetailView = ({ show, activeEpisodeId, loading = false, progressByIt
             </p>
           ) : null}
         </div>
+        <button type="button" className="btn shrink-0" onClick={onToggleFavorite}>
+          <Star size={14} className={isFavorite ? "fill-amber-300 text-amber-300" : ""} />
+          {isFavorite ? "Unfavorite" : "Favorite"}
+        </button>
         {nextUnwatched ? (
           <button type="button" className="btn btn-primary shrink-0" onClick={() => onPlay(nextUnwatched)}>
             <Play size={14} />
