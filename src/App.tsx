@@ -68,6 +68,8 @@ const App = () => {
   const [visitRestorePause, setVisitRestorePause] = useState(false);
   const [deepLinkError, setDeepLinkError] = useState<string | null>(null);
   const [loadingSeriesId, setLoadingSeriesId] = useState<string | null>(null);
+  const shouldRenderAnalytics =
+    typeof window !== "undefined" && !["localhost", "127.0.0.1"].includes(window.location.hostname);
 
   const setPlaylists = (playlists: SavedPlaylist[]) => setState((prev) => ({ ...prev, playlists }));
   const setActivePlaylistId = (activePlaylistId: string | null) => setState((prev) => ({ ...prev, activePlaylistId }));
@@ -944,7 +946,7 @@ const App = () => {
         onSubmit={handleImport}
       />
       <InstallAppBanner />
-      <Analytics />
+      {shouldRenderAnalytics ? <Analytics /> : null}
     </div>
   );
 };

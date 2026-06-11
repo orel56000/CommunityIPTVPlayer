@@ -9,4 +9,7 @@ coverage
 vite.config.js
 vite.config.d.ts
 /.playwright-mcp
+<<<<<<< Updated upstream
 *.log
+=======
+>>>>>>> Stashed changes
