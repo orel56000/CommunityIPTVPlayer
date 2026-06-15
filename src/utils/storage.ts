@@ -13,6 +13,7 @@ const clampVolume = (value: number): number => Math.min(2, Math.max(0, value));
 export interface LastPlayedWatch {
   playlistName: string;
   shareId: string;
+  itemId?: string;
 }
 
 export interface PersistedState {
@@ -127,6 +128,8 @@ export const storage = {
             ? {
                 playlistName: parsed.lastPlayedWatch.playlistName,
                 shareId: parsed.lastPlayedWatch.shareId,
+                itemId:
+                  typeof parsed.lastPlayedWatch.itemId === "string" ? parsed.lastPlayedWatch.itemId : undefined,
               }
             : defaultState.lastPlayedWatch,
       };

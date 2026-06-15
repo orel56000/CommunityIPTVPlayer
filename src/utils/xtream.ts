@@ -1,5 +1,6 @@
 import type { ImportResult, PlaylistItem, XtreamSourceConfig } from "../types/models";
 import { proxifyRemoteAssetUrl, toProxyUrl } from "./proxyUrl";
+import { computeShareIdFromUrl } from "./shareId";
 
 interface XtreamCategory {
   category_id?: string | number;
@@ -397,7 +398,7 @@ export const importXtreamPlaylist = async (
       catchup: String(stream.tv_archive ?? "0"),
       catchupDays: archiveDays,
       xuiId: streamId,
-      shareId: undefined,
+      shareId: computeShareIdFromUrl(streamUrl),
     } as PlaylistItem;
     items.push(baseItem);
     if (String(stream.tv_archive ?? "0") === "1") {
@@ -435,6 +436,7 @@ export const importXtreamPlaylist = async (
       metadata: toStringRecord(stream, ["name", "stream_icon", "category_id", "plot", "rating", "releaseDate", "year"]),
       rawAttributes: {},
       xuiId: streamId,
+      shareId: computeShareIdFromUrl(streamUrl),
     });
   }
 

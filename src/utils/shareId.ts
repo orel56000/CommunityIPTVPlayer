@@ -39,3 +39,12 @@ export const getShareId = (item: Pick<PlaylistItem, "shareId" | "streamUrl" | "u
   if (item.shareId) return item.shareId;
   return computeShareIdFromUrl(item.streamUrl || item.url || "");
 };
+
+export const itemMatchesShareId = (
+  item: Pick<PlaylistItem, "shareId" | "streamUrl" | "url">,
+  shareId: string,
+): boolean => {
+  if (item.shareId === shareId) return true;
+  const streamUrl = item.streamUrl || item.url || "";
+  return streamUrl ? computeShareIdFromUrl(streamUrl) === shareId : false;
+};

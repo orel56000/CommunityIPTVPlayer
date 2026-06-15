@@ -5,7 +5,7 @@ import type { AppSettings, UIFilters } from "./types/player";
 import type { PlaylistItem, PlaylistSection, SavedPlaylist } from "./types/models";
 import { storage } from "./utils/storage";
 import { getShareId } from "./utils/shareId";
-import { buildEpisodeUrl, buildWatchPath, parseWatchPath } from "./utils/watchUrl";
+import { buildEpisodeUrl, buildWatchPath, parseWatchPath, resolveWatchDeepLink } from "./utils/watchUrl";
 import { buildSeriesFromCatalog, getGroups, getNextEpisode, groupSeries } from "./utils/grouping";
 import { useActivePlaylist } from "./hooks/useActivePlaylist";
 import { usePlaylistImport } from "./hooks/usePlaylistImport";
@@ -247,13 +247,14 @@ const App = () => {
     if (!pl) return;
     const shareId = getShareId(item);
     const target = buildWatchPath(pl.name, shareId);
-    const watch = { playlistName: pl.name, shareId };
+    const watch = { playlistName: pl.name, shareId, itemId: item.id };
 
     setState((prev) => {
       if (
         prev.lastPlayedId === item.id &&
         prev.lastPlayedWatch?.playlistName === watch.playlistName &&
-        prev.lastPlayedWatch?.shareId === watch.shareId
+        prev.lastPlayedWatch?.shareId === watch.shareId &&
+        prev.lastPlayedWatch?.itemId === watch.itemId
       ) {
         return prev;
       }
@@ -448,26 +449,26 @@ const App = () => {
   useEffect(() => {
     if (!deepLink) return;
     const { playlistName, shareId } = deepLink;
+    const key = `${playlistName}\0${shareId}`;
 
-    if (playerState.currentItem && getShareId(playerState.currentItem) !== shareId) {
+    const hints: { itemId?: string | null } = {};
+    if (state.lastPlayedWatch?.playlistName === playlistName && state.lastPlayedWatch?.shareId === shareId) {
+      hints.itemId = state.lastPlayedWatch.itemId ?? state.lastPlayedId;
+    }
+
+    const resolution = resolveWatchDeepLink(state.playlists, deepLink, hints);
+
+    if (resolution.status === "pending") {
+      setDeepLinkError(null);
       return;
     }
 
-    const stillHydrating = state.playlists.some((p) => (p.itemCount ?? 0) > 0 && p.items.length === 0);
-    const playlist = state.playlists.find((p) => p.name === playlistName);
-
-    if (!playlist) {
-      if (!stillHydrating && state.playlists.length > 0) {
+    if (resolution.status === "not_found") {
+      if (!resolution.playlist && state.playlists.length > 0) {
         setDeepLinkError(
           `No playlist named “${playlistName}”. Links use the exact playlist name — rename or import a playlist to match.`,
         );
-      }
-      return;
-    }
-
-    const item = playlist.items.find((it) => getShareId(it) === shareId);
-    if (!item) {
-      if (!stillHydrating && playlist.items.length > 0) {
+      } else if (resolution.playlist && resolution.playlist.items.length > 0) {
         setDeepLinkError(
           `That stream is not in playlist “${playlistName}”. Both people need the same stream URL in the M3U so the episode ID matches.`,
         );
@@ -475,14 +476,12 @@ const App = () => {
       return;
     }
 
-    const key = `${playlistName}\0${shareId}`;
-    if (playerState.currentItem && getShareId(playerState.currentItem) === shareId) {
-      const hosting = state.playlists.find((p) => p.id === playerState.currentItem!.playlistId);
-      if (hosting?.name === playlistName) {
-        appliedDeepLinkKey.current = key;
-        setDeepLinkError(null);
-        return;
-      }
+    const { item, playlist } = resolution;
+
+    if (playerState.currentItem?.id === item.id) {
+      appliedDeepLinkKey.current = key;
+      setDeepLinkError(null);
+      return;
     }
 
     if (appliedDeepLinkKey.current === key) return;
@@ -493,7 +492,17 @@ const App = () => {
     setSection(item.section);
     setCurrentItem(item);
     pushRecentForItem(item);
-  }, [deepLink, playerState.currentItem, pushRecentForItem, setActivePlaylistId, setCurrentItem, setSection, state.playlists]);
+  }, [
+    deepLink,
+    playerState.currentItem,
+    pushRecentForItem,
+    setActivePlaylistId,
+    setCurrentItem,
+    setSection,
+    state.lastPlayedId,
+    state.lastPlayedWatch,
+    state.playlists,
+  ]);
 
   const handleToggleFavorite = (item: PlaylistItem) => toggleFavorite(item.playlistId, item.id);
   const handleToggleFavoriteSeries = useCallback(
