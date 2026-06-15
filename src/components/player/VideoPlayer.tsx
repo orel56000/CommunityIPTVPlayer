@@ -5,6 +5,7 @@ import mpegts from "mpegts.js";
 import type { PlaylistItem } from "../../types/models";
 import { useChromecast } from "../../hooks/useChromecast";
 import { downloadMediaFile, isHlsUrl } from "../../utils/downloadStream";
+import { resolveStreamPlaybackUrl } from "../../utils/proxyUrl";
 import { buildLivePlaybackAttempts, toXtreamTsUrl } from "../../utils/xtreamStreamUrl";
 import { PlayerOverlay } from "./PlayerOverlay";
 
@@ -180,6 +181,9 @@ const userMessageFromDiagnostic = (
     return "URL ends in .ts but the server returned an HLS manifest. Re-import with Live output: HLS (.m3u8).";
   }
   if (diagnostic.probeFetch === "failed") {
+    if (diagnostic.proxied) {
+      return `Stream proxy could not reach the provider (${String(diagnostic.fetchError ?? "network error")}).`;
+    }
     return `Browser could not fetch the stream URL (${String(diagnostic.fetchError ?? "network/CORS")}).`;
   }
   if (playbackMode === "hls" && payloadKind !== "hls-manifest" && payloadKind !== "unknown") {
@@ -226,17 +230,21 @@ const resolveLiveFailureMessage = (
 
 /** Fetch first bytes of the stream URL and return a paste-friendly diagnostic object. */
 const diagnoseStreamUrl = async (streamUrl: string): Promise<Record<string, unknown>> => {
+  const playbackUrl = resolveStreamPlaybackUrl(streamUrl);
   const urlExtension = streamUrl.match(/\.([a-z0-9]+)(?:\?|$)/i)?.[1]?.toLowerCase() ?? "none";
   const crossOrigin = isCrossOriginStream(streamUrl);
+  const proxied = playbackUrl !== streamUrl;
   const base: Record<string, unknown> = {
     streamUrl,
+    playbackUrl,
+    proxied,
     urlExtension,
     crossOrigin,
     pageOrigin: window.location.origin,
   };
 
   try {
-    const response = await fetch(streamUrl, {
+    const response = await fetch(playbackUrl, {
       method: "GET",
       headers: { Range: "bytes=0-2047", Accept: "*/*" },
       cache: "no-store",
@@ -595,6 +603,7 @@ export const VideoPlayer = ({
     };
 
     const streamUrl = item.streamUrl;
+    const playbackUrl = resolveStreamPlaybackUrl(streamUrl);
     const playbackMode = resolvePlaybackMode(streamUrl, item.section);
     const liveAttempts = item.section === "live" ? buildLivePlaybackAttempts(streamUrl) : [];
     const vlcFallbackUrl = item.section === "live" ? toXtreamTsUrl(streamUrl) : null;
@@ -604,17 +613,22 @@ export const VideoPlayer = ({
       title: item.title,
       section: item.section,
       streamUrl,
+      playbackUrl,
       engine: modeLabel(playbackMode),
       autoplay,
       hlsSupported: Hls.isSupported(),
       mpegtsSupported: canUseMpegTsEngine(),
       crossOrigin: isCrossOriginStream(streamUrl),
+      proxied: playbackUrl !== streamUrl,
       vlcFallbackUrl,
       playbackPlan: liveAttempts.map((attempt) => `${attempt.label}:${attempt.url}`),
     };
 
     let liveAttemptIndex = 0;
-    let activeLiveAttempts = liveAttempts;
+    let activeLiveAttempts = liveAttempts.map((attempt) => ({
+      ...attempt,
+      url: attempt.url.startsWith("/api/") ? attempt.url : resolveStreamPlaybackUrl(attempt.url),
+    }));
     let liveRestreamRetries = 0;
 
     const failPlayback = (
@@ -799,7 +813,8 @@ export const VideoPlayer = ({
 
     void (async () => {
       latestDiagnostic = await diagnoseStreamUrl(streamUrl);
-      const playbackPlan = item.section === "live" ? activeLiveAttempts.map((a) => `${a.label}:${a.url}`) : [streamUrl];
+      const playbackPlan =
+        item.section === "live" ? activeLiveAttempts.map((a) => `${a.label}:${a.url}`) : [playbackUrl];
       console.info("[IPTV][Player] Starting playback", {
         ...playbackContext,
         playbackPlan,
@@ -835,7 +850,7 @@ export const VideoPlayer = ({
       if (playbackMode === "hls") {
         const hls = new Hls();
         hlsRef.current = hls;
-        hls.loadSource(streamUrl);
+        hls.loadSource(playbackUrl);
         hls.attachMedia(video);
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
           console.info("[IPTV][Player] HLS manifest parsed", playbackContext);
@@ -870,7 +885,7 @@ export const VideoPlayer = ({
         const player = mpegts.createPlayer(
           {
             type: "mpegts",
-            url: streamUrl,
+            url: playbackUrl,
             isLive: false,
             cors: true,
             withCredentials: false,
@@ -915,7 +930,7 @@ export const VideoPlayer = ({
         return;
       }
 
-      video.src = streamUrl;
+      video.src = playbackUrl;
       switchingSourceRef.current = false;
       playCurrent();
       if (!autoplay) setLoading(false);
