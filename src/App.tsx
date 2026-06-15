@@ -16,32 +16,21 @@ import { usePlaylistFilter } from "./hooks/usePlaylistFilter";
 import { usePlayer } from "./hooks/usePlayer";
 import { useDebouncedValue } from "./hooks/useDebouncedValue";
 import { Header } from "./components/layout/Header";
-import { Sidebar } from "./components/layout/Sidebar";
+import { SearchOverlay, type SearchOpenFocus } from "./components/layout/SearchOverlay";
 import { PlaylistImportModal } from "./components/playlist/PlaylistImportModal";
 import { VideoPlayer } from "./components/player/VideoPlayer";
 import { PlaylistManager } from "./components/playlist/PlaylistManager";
-import { SectionTabs } from "./components/layout/SectionTabs";
-import { SearchBar } from "./components/browse/SearchBar";
-import { FilterBar } from "./components/browse/FilterBar";
-import { ChannelList } from "./components/browse/ChannelList";
-import { ContentGrid } from "./components/browse/ContentGrid";
-import { SeriesBrowser } from "./components/browse/SeriesBrowser";
-import { CatchupBrowser } from "./components/browse/CatchupBrowser";
-import { FavoritesView } from "./components/views/FavoritesView";
-import { RecentView } from "./components/views/RecentView";
-import { ContinueWatchingView } from "./components/views/ContinueWatchingView";
 import { SettingsView } from "./components/views/SettingsView";
-import { EmptyState } from "./components/shared/EmptyState";
 import { ErrorState } from "./components/shared/ErrorState";
 import { InstallAppBanner } from "./components/shared/InstallAppBanner";
 import { DetailsPanel } from "./components/panels/DetailsPanel";
 import { PlayerNavBar } from "./components/player/PlayerNavBar";
 import { now } from "./utils/time";
 import { playlistDb } from "./utils/indexedDb";
-import { filterByQuery } from "./utils/search";
 import { loadPlaylistSource } from "./utils/loadPlaylistSource";
 import { loadXtreamSeriesEpisodes } from "./utils/xtream";
 import { serializePlaylistItemsToM3u } from "./utils/exportM3u";
+import { resolveRecentDisplayItem, resolveRecentItemId } from "./utils/recentItems";
 
 const initialFilters: UIFilters = {
   query: "",
@@ -56,16 +45,15 @@ const App = () => {
 
   const [state, setState] = useState(storage.load);
   const [importOpen, setImportOpen] = useState(false);
-  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchFocus, setSearchFocus] = useState<SearchOpenFocus | null>(null);
   const [filters, setFilters] = useState<UIFilters>(initialFilters);
   const debouncedQuery = useDebouncedValue(filters.query, 180);
   const [storageError, setStorageError] = useState<string | null>(null);
-  const [selectedSeriesId, setSelectedSeriesId] = useState<string | null>(null);
   const lastProgressRef = useRef<Record<string, number>>({});
   const syncedPlaylistIdsRef = useRef<Set<string>>(new Set());
   const restoredLastVisitRef = useRef(false);
   const appliedDeepLinkKey = useRef<string | null>(null);
-  const [visitRestorePause, setVisitRestorePause] = useState(false);
   const [deepLinkError, setDeepLinkError] = useState<string | null>(null);
   const [loadingSeriesId, setLoadingSeriesId] = useState<string | null>(null);
   const shouldRenderAnalytics =
@@ -80,7 +68,12 @@ const App = () => {
     setState((prev) => ({ ...prev, continueWatching }));
   const setSettings = (settings: AppSettings) => setState((prev) => ({ ...prev, settings }));
   const setSection = (section: PlaylistSection) => setState((prev) => ({ ...prev, section }));
-  const setLastPlayedId = (lastPlayedId: string | null) => setState((prev) => ({ ...prev, lastPlayedId }));
+  const toggleRightPanel = useCallback(() => {
+    setState((prev) => ({
+      ...prev,
+      settings: { ...prev.settings, rightPanelOpen: !prev.settings.rightPanelOpen },
+    }));
+  }, []);
 
   useEffect(() => {
     const result = storage.save(state);
@@ -182,7 +175,7 @@ const App = () => {
 
   const { favoriteSet, toggleFavorite, clearFavorites } = useFavorites(state.favorites, setFavorites);
   const { pushRecent, clearRecents } = useRecents(state.recents, setRecents);
-  const { updateProgress, clearContinueWatching, removeContinueWatching, getResumePosition } = useContinueWatching(
+  const { updateProgress, clearContinueWatching, getResumePosition } = useContinueWatching(
     state.continueWatching,
     setContinueWatching,
     state.progress,
@@ -204,6 +197,18 @@ const App = () => {
       return;
     }
     if (restoredLastVisitRef.current) return;
+    if (location.pathname !== "/") {
+      restoredLastVisitRef.current = true;
+      return;
+    }
+
+    const watch = state.lastPlayedWatch;
+    if (watch) {
+      restoredLastVisitRef.current = true;
+      navigate(buildWatchPath(watch.playlistName, watch.shareId), { replace: true });
+      return;
+    }
+
     if (!state.lastPlayedId) {
       restoredLastVisitRef.current = true;
       return;
@@ -214,7 +219,6 @@ const App = () => {
 
     if (found) {
       restoredLastVisitRef.current = true;
-      setVisitRestorePause(true);
       setCurrentItem(found);
       if (found.playlistId !== state.activePlaylistId) setActivePlaylistId(found.playlistId);
       setSection(found.section);
@@ -223,7 +227,41 @@ const App = () => {
 
     if (stillHydrating) return;
     restoredLastVisitRef.current = true;
-  }, [deepLink, state.playlists, state.lastPlayedId, state.activePlaylistId, setCurrentItem, setSection, setActivePlaylistId]);
+  }, [
+    deepLink,
+    location.pathname,
+    navigate,
+    state.playlists,
+    state.lastPlayedId,
+    state.lastPlayedWatch,
+    state.activePlaylistId,
+    setCurrentItem,
+    setSection,
+    setActivePlaylistId,
+  ]);
+
+  useEffect(() => {
+    const item = playerState.currentItem;
+    if (!item) return;
+    const pl = state.playlists.find((p) => p.id === item.playlistId);
+    if (!pl) return;
+    const shareId = getShareId(item);
+    const target = buildWatchPath(pl.name, shareId);
+    const watch = { playlistName: pl.name, shareId };
+
+    setState((prev) => {
+      if (
+        prev.lastPlayedId === item.id &&
+        prev.lastPlayedWatch?.playlistName === watch.playlistName &&
+        prev.lastPlayedWatch?.shareId === watch.shareId
+      ) {
+        return prev;
+      }
+      return { ...prev, lastPlayedId: item.id, lastPlayedWatch: watch };
+    });
+
+    if (location.pathname !== target) navigate(target, { replace: true });
+  }, [playerState.currentItem, state.playlists, location.pathname, navigate]);
 
   useEffect(() => {
     if (!deepLink) {
@@ -231,15 +269,6 @@ const App = () => {
       setDeepLinkError(null);
     }
   }, [deepLink]);
-
-  useEffect(() => {
-    const item = playerState.currentItem;
-    if (!item) return;
-    const pl = state.playlists.find((p) => p.id === item.playlistId);
-    if (!pl) return;
-    const target = buildWatchPath(pl.name, getShareId(item));
-    if (location.pathname !== target) navigate(target, { replace: true });
-  }, [playerState.currentItem, state.playlists, location.pathname, navigate]);
 
   const handlePlayerVolume = useCallback(
     (next: number) => {
@@ -294,15 +323,6 @@ const App = () => {
     [filters, debouncedQuery],
   );
   const filteredItems = usePlaylistFilter(sectionItems, filtersForSearch, favoriteSet);
-  const seriesForView = useMemo(
-    () =>
-      state.section === "series"
-        ? hasSeriesCatalog
-          ? buildSeriesFromCatalog(playlistItems, filteredItems)
-          : groupSeries(filteredItems)
-        : [],
-    [state.section, hasSeriesCatalog, playlistItems, filteredItems],
-  );
   const allSeriesForPlaylist = useMemo(() => buildSeriesViewForItems(playlistItems), [buildSeriesViewForItems, playlistItems]);
   const seriesFavoriteItemById = useMemo(() => {
     const map = new Map<string, PlaylistItem>();
@@ -380,12 +400,31 @@ const App = () => {
     [state.favorites, state.playlists],
   );
 
-  const recentsItems = useMemo(
-    () =>
-      state.recents
-        .map((entry) => state.playlists.flatMap((playlist) => playlist.items).find((item) => item.id === entry.itemId))
-        .filter(Boolean) as PlaylistItem[],
-    [state.recents, state.playlists],
+  const recentsItems = useMemo(() => {
+    const seen = new Set<string>();
+    const items: PlaylistItem[] = [];
+    for (const entry of state.recents) {
+      const playlist = state.playlists.find((pl) => pl.id === entry.playlistId);
+      if (!playlist) continue;
+      const grouped = buildSeriesViewForItems(playlist.items);
+      const item = resolveRecentDisplayItem(entry.itemId, entry.playlistId, playlist.items, grouped);
+      if (!item) continue;
+      const key = `${item.playlistId}::${item.id}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      items.push(item);
+    }
+    return items;
+  }, [buildSeriesViewForItems, state.recents, state.playlists]);
+
+  const pushRecentForItem = useCallback(
+    (item: PlaylistItem) => {
+      const playlist = state.playlists.find((pl) => pl.id === item.playlistId);
+      const items = playlist?.items ?? playlistItems;
+      const grouped = playlist ? buildSeriesViewForItems(items) : allSeriesForPlaylist;
+      pushRecent(item.playlistId, resolveRecentItemId(item, items, grouped));
+    },
+    [allSeriesForPlaylist, buildSeriesViewForItems, playlistItems, pushRecent, state.playlists],
   );
 
   const continueItems = useMemo(
@@ -395,27 +434,16 @@ const App = () => {
         .filter(Boolean) as PlaylistItem[],
     [state.continueWatching, state.playlists],
   );
-  const filteredFavoritesItems = useMemo(() => filterByQuery(favoritesItems, debouncedQuery), [favoritesItems, debouncedQuery]);
-  const filteredRecentsItems = useMemo(() => filterByQuery(recentsItems, debouncedQuery), [recentsItems, debouncedQuery]);
-  const filteredContinueItems = useMemo(() => filterByQuery(continueItems, debouncedQuery), [continueItems, debouncedQuery]);
 
-  const currentResultCount = useMemo(() => {
-    switch (state.section) {
-      case "live":
-      case "movies":
-      case "series":
-      case "catchup":
-        return filteredItems.length;
-      case "favorites":
-        return filteredFavoritesItems.length;
-      case "recents":
-        return filteredRecentsItems.length;
-      case "continue":
-        return filteredContinueItems.length;
-      default:
-        return undefined;
-    }
-  }, [state.section, filteredItems.length, filteredFavoritesItems.length, filteredRecentsItems.length, filteredContinueItems.length]);
+  const openSearch = useCallback((focus?: SearchOpenFocus | null) => {
+    setSearchFocus(focus ?? null);
+    setSearchOpen(true);
+  }, []);
+
+  const closeSearch = useCallback(() => {
+    setSearchOpen(false);
+    setSearchFocus(null);
+  }, []);
 
   useEffect(() => {
     if (!deepLink) return;
@@ -463,19 +491,9 @@ const App = () => {
 
     setActivePlaylistId(playlist.id);
     setSection(item.section);
-    if (item.kind === "series_episode") {
-      const grouped = buildSeriesViewForItems(playlist.items);
-      const show = grouped.find((s) => s.episodes.some((ep) => ep.id === item.id));
-      if (show) {
-        setFilters((prev) => ({ ...prev, query: "", selectedGroup: "all", favoritesOnly: false }));
-        setSelectedSeriesId(show.id);
-      }
-    }
-    setVisitRestorePause(false);
     setCurrentItem(item);
-    setLastPlayedId(item.id);
-    pushRecent(item.playlistId, item.id);
-  }, [buildSeriesViewForItems, deepLink, playerState.currentItem, pushRecent, setActivePlaylistId, setCurrentItem, setFilters, setLastPlayedId, setSection, setSelectedSeriesId, state.playlists]);
+    pushRecentForItem(item);
+  }, [deepLink, playerState.currentItem, pushRecentForItem, setActivePlaylistId, setCurrentItem, setSection, state.playlists]);
 
   const handleToggleFavorite = (item: PlaylistItem) => toggleFavorite(item.playlistId, item.id);
   const handleToggleFavoriteSeries = useCallback(
@@ -523,30 +541,115 @@ const App = () => {
 
   const handlePlay = useCallback((item: PlaylistItem) => {
     if (item.kind === "series") {
-      setVisitRestorePause(false);
       if (item.playlistId !== state.activePlaylistId) setActivePlaylistId(item.playlistId);
-      setFilters((prev) => ({ ...prev, query: "", selectedGroup: "all", favoritesOnly: false }));
-      setSelectedSeriesId(item.id);
-      setSection("series");
       void ensureSeriesLoaded(item.id);
+      openSearch({ category: "series", seriesId: item.id });
       return;
     }
-    setVisitRestorePause(false);
     setCurrentItem(item);
-    setLastPlayedId(item.id);
-    pushRecent(item.playlistId, item.id);
-  }, [ensureSeriesLoaded, pushRecent, setActivePlaylistId, setCurrentItem, setFilters, setLastPlayedId, setSection, state.activePlaylistId]);
+    pushRecentForItem(item);
+  }, [ensureSeriesLoaded, openSearch, pushRecentForItem, setActivePlaylistId, setCurrentItem, state.activePlaylistId]);
 
-  const handleSelectSeries = useCallback(
-    async (seriesId: string | null) => {
-      if (!seriesId) {
-        setSelectedSeriesId(null);
+  const openSearchForNowPlaying = useCallback(() => {
+    const item = playerState.currentItem;
+    if (!item) {
+      openSearch();
+      return;
+    }
+
+    if (item.kind === "series") {
+      void ensureSeriesLoaded(item.id);
+      openSearch({ category: "series", seriesId: item.id });
+      return;
+    }
+
+    if (item.kind === "series_episode" || item.section === "series") {
+      const show = allSeriesForPlaylist.find((series) => series.episodes.some((ep) => ep.id === item.id));
+      if (show) {
+        void ensureSeriesLoaded(show.id);
+        openSearch({ category: "series", seriesId: show.id });
         return;
       }
-      setSelectedSeriesId(seriesId);
-      await ensureSeriesLoaded(seriesId);
+
+      const catalog = playlistItems.find(
+        (entry) =>
+          entry.kind === "series" &&
+          (entry.id === item.parentSeriesId ||
+            entry.xuiId === item.parentSeriesId ||
+            entry.sourceId === item.parentSeriesId),
+      );
+      if (catalog) {
+        void ensureSeriesLoaded(catalog.id);
+        openSearch({ category: "series", seriesId: catalog.id });
+        return;
+      }
+    }
+
+    const categoryBySection: Partial<Record<PlaylistSection, SearchOpenFocus["category"]>> = {
+      live: "live",
+      movies: "movies",
+      catchup: "catchup",
+      series: "series",
+      favorites: "favorites",
+      recents: "recents",
+      continue: "continue",
+    };
+    openSearch({ category: categoryBySection[item.section] ?? "all" });
+  }, [allSeriesForPlaylist, ensureSeriesLoaded, openSearch, playerState.currentItem, playlistItems]);
+
+  const handleSearchPlay = useCallback(
+    (item: PlaylistItem) => {
+      setSearchOpen(false);
+      setSearchFocus(null);
+      setSection(item.section);
+      setActivePlaylistId(item.playlistId);
+      handlePlay(item);
     },
-    [ensureSeriesLoaded],
+    [handlePlay, setActivePlaylistId, setSection],
+  );
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.code !== "Slash" || searchOpen) return;
+      const target = event.target as HTMLElement | null;
+      if (target?.closest("input, textarea, select, [contenteditable=true]")) return;
+      event.preventDefault();
+      openSearch();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [openSearch, searchOpen]);
+
+  const goToBrowseFromDetails = useCallback(
+    (item: PlaylistItem) => {
+      if (item.playlistId !== state.activePlaylistId) setActivePlaylistId(item.playlistId);
+      if (item.kind === "series_episode") {
+        const pl = state.playlists.find((p) => p.id === item.playlistId);
+        if (!pl) return;
+        const grouped = buildSeriesViewForItems(pl.items);
+        const show = grouped.find((s) => s.episodes.some((ep) => ep.id === item.id));
+        if (show) {
+          void ensureSeriesLoaded(show.id);
+          openSearch({ category: "series", seriesId: show.id });
+        }
+        return;
+      }
+      if (item.kind === "series") {
+        void ensureSeriesLoaded(item.id);
+        openSearch({ category: "series", seriesId: item.id });
+        return;
+      }
+      const categoryBySection: Partial<Record<PlaylistSection, SearchOpenFocus["category"]>> = {
+        live: "live",
+        movies: "movies",
+        catchup: "catchup",
+        favorites: "favorites",
+        recents: "recents",
+        continue: "continue",
+      };
+      openSearch({ category: categoryBySection[item.section] ?? "all" });
+    },
+    [buildSeriesViewForItems, ensureSeriesLoaded, openSearch, state.activePlaylistId, state.playlists, setActivePlaylistId],
   );
 
   const currentNextEpisode = useMemo(() => {
@@ -554,34 +657,6 @@ const App = () => {
     if (!current || current.kind !== "series_episode") return null;
     return getNextEpisode(groupedSeries, current.id);
   }, [groupedSeries, playerState.currentItem]);
-
-  const openSeriesForEpisode = (episode: PlaylistItem) => {
-    const show = allSeriesForPlaylist.find((series) => series.episodes.some((ep) => ep.id === episode.id));
-    if (!show) return;
-    setFilters((prev) => ({ ...prev, query: "", selectedGroup: "all", favoritesOnly: false }));
-    setSelectedSeriesId(show.id);
-    setSection("series");
-  };
-
-  const goToBrowseFromDetails = useCallback(
-    (item: PlaylistItem) => {
-      if (item.playlistId !== state.activePlaylistId) setActivePlaylistId(item.playlistId);
-      setFilters((prev) => ({ ...prev, query: "", selectedGroup: "all", favoritesOnly: false }));
-      if (item.kind === "series_episode") {
-        const pl = state.playlists.find((p) => p.id === item.playlistId);
-        if (!pl) return;
-        const grouped = buildSeriesViewForItems(pl.items);
-        const show = grouped.find((s) => s.episodes.some((ep) => ep.id === item.id));
-        if (show) {
-          setSelectedSeriesId(show.id);
-          setSection("series");
-        }
-        return;
-      }
-      setSection(item.section as PlaylistSection);
-    },
-    [buildSeriesViewForItems, state.activePlaylistId, state.playlists, setActivePlaylistId, setFilters, setSelectedSeriesId, setSection],
-  );
 
   const handleImport = async (
     name: string,
@@ -763,203 +838,78 @@ const App = () => {
     return buildEpisodeUrl(currentItemPlaylist.name, getShareId(playerState.currentItem));
   }, [playerState.currentItem, currentItemPlaylist]);
 
-  const renderSection = () => {
-    if (!activePlaylist && !["settings", "favorites", "recents", "continue"].includes(state.section)) {
-      return (
-        <EmptyState
-          title="No playlist selected"
-          description="Add an M3U playlist or Xtream source to browse live TV, movies, series, and catch-up content."
-          action={
-            <button className="btn btn-primary" onClick={() => setImportOpen(true)} type="button">
-              Import playlist
-            </button>
-          }
-        />
-      );
-    }
-    switch (state.section) {
-      case "live":
-        return (
-          <ChannelList
-            channels={filteredItems}
-            activeItemId={playerState.currentItem?.id}
-            favoriteSet={favoriteSet}
-            onPlay={handlePlay}
-            onToggleFavorite={handleToggleFavorite}
-          />
-        );
-      case "movies":
-        return (
-          <ContentGrid
-            items={filteredItems}
-            activeItemId={playerState.currentItem?.id}
-            favoriteSet={favoriteSet}
-            onPlay={handlePlay}
-            onToggleFavorite={handleToggleFavorite}
-          />
-        );
-      case "series":
-        return (
-          <SeriesBrowser
-            series={seriesForView}
-            activeEpisodeId={playerState.currentItem?.id}
-            selectedSeriesId={selectedSeriesId}
-            progressByItemId={progressByItemId}
-            loadingSeriesId={loadingSeriesId}
-            favoriteSeriesIds={favoriteSeriesIds}
-            onSelectSeries={handleSelectSeries}
-            onToggleFavoriteSeries={handleToggleFavoriteSeries}
-            onPlayEpisode={handlePlay}
-          />
-        );
-      case "catchup":
-        return <CatchupBrowser items={filteredItems} onPlay={handlePlay} />;
-      case "favorites":
-        return (
-          <FavoritesView
-            items={filteredFavoritesItems}
-            activeItemId={playerState.currentItem?.id}
-            favoriteSet={favoriteSet}
-            onPlay={handlePlay}
-            onToggleFavorite={handleToggleFavorite}
-          />
-        );
-      case "recents":
-        return (
-          <RecentView
-            items={filteredRecentsItems}
-            favoriteSet={favoriteSet}
-            activeItemId={playerState.currentItem?.id}
-            onPlay={handlePlay}
-            onToggleFavorite={handleToggleFavorite}
-          />
-        );
-      case "continue":
-        return (
-          <ContinueWatchingView
-            items={filteredContinueItems}
-            progress={state.progress}
-            onPlay={handlePlay}
-            onRemove={(item) => removeContinueWatching(item.id)}
-            onOpenSeries={openSeriesForEpisode}
-          />
-        );
-      case "settings":
-        return (
-          <SettingsView
-            settings={state.settings}
-            onUpdate={setSettings}
-            onClearFavorites={clearFavorites}
-            onClearRecents={clearRecents}
-            onClearContinue={clearContinueWatching}
-            onRemoveAllPlaylists={() => {
-              void Promise.all([playlistDb.clearPlaylistItems(), playlistDb.clearPlaylistSources()]);
-              setPlaylists([]);
-              setActivePlaylistId(null);
-            }}
-            onExport={exportData}
-            onImport={importData}
-          />
-        );
-      default:
-        return null;
-    }
-  };
+  const settingsPanel = (
+    <SettingsView
+      embedded
+      settings={state.settings}
+      onUpdate={setSettings}
+      onClearFavorites={clearFavorites}
+      onClearRecents={clearRecents}
+      onClearContinue={clearContinueWatching}
+      onRemoveAllPlaylists={() => {
+        void Promise.all([playlistDb.clearPlaylistItems(), playlistDb.clearPlaylistSources()]);
+        setPlaylists([]);
+        setActivePlaylistId(null);
+      }}
+      onExport={exportData}
+      onImport={importData}
+    />
+  );
 
   return (
-    <div className="min-h-screen text-slate-100">
-      <Header currentItem={playerState.currentItem} onOpenImport={() => setImportOpen(true)} onToggleSidebar={() => setMobileSidebarOpen(true)} />
-      <div className="mx-auto flex w-full max-w-[1920px]">
-        <Sidebar
-          playlists={state.playlists}
-          activePlaylistId={state.activePlaylistId}
-          activeSection={state.section as PlaylistSection}
-          collapsed={state.settings.sidebarCollapsed}
-          mobileOpen={mobileSidebarOpen}
-          onCloseMobile={() => setMobileSidebarOpen(false)}
-          onSelectPlaylist={setActivePlaylistId}
-          onSelectSection={setSection}
-        />
-        <main className="min-h-[calc(100vh-4rem)] flex-1 px-4 py-6 lg:px-8">
-          <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_380px]">
-            <div className="space-y-5">
-              <VideoPlayer
-                item={playerState.currentItem}
-                autoplay={state.settings.autoplay && !visitRestorePause}
-                volume={playerState.volume}
-                muted={playerState.muted}
-                volumePercentMode={state.settings.volumePercentMode}
-                onVolume={handlePlayerVolume}
-                onMuted={setMuted}
-                onError={setError}
-                onPlayingState={setPlaying}
-                onProgress={onPlayerProgress}
-                onEnded={onPlayerEnded}
-                resumeFrom={currentResume}
+    <div className="flex h-full flex-col overflow-hidden text-slate-100">
+      <Header
+        currentItem={playerState.currentItem}
+        rightPanelOpen={state.settings.rightPanelOpen}
+        onOpenSearch={() => openSearch()}
+        onOpenNowPlaying={openSearchForNowPlaying}
+        onToggleRightPanel={toggleRightPanel}
+      />
+      <main className="mx-auto flex min-h-0 w-full max-w-[1920px] flex-1 flex-col overflow-hidden px-4 py-3 lg:px-8">
+        <div
+          className={
+            state.settings.rightPanelOpen
+              ? "grid h-full min-h-0 gap-4 overflow-hidden xl:grid-cols-[minmax(0,1fr)_380px]"
+              : "grid h-full min-h-0 gap-4 overflow-hidden"
+          }
+        >
+          <div className="flex h-full min-h-0 flex-col gap-3 overflow-hidden">
+            <VideoPlayer
+              className="min-h-0 flex-1"
+              item={playerState.currentItem}
+              autoplay={state.settings.autoplay}
+              volume={playerState.volume}
+              muted={playerState.muted}
+              volumePercentMode={state.settings.volumePercentMode}
+              onVolume={handlePlayerVolume}
+              onMuted={setMuted}
+              onError={setError}
+              onPlayingState={setPlaying}
+              onProgress={onPlayerProgress}
+              onEnded={onPlayerEnded}
+              resumeFrom={currentResume}
+            />
+            {currentNextEpisode ? (
+              <PlayerNavBar
+                nextEpisode={currentNextEpisode}
+                onPlayNext={() => currentNextEpisode && handlePlay(currentNextEpisode)}
               />
-              {playerState.currentItem ? (
-                <PlayerNavBar
-                  currentTitle={playerState.currentItem.title}
-                  nextEpisode={currentNextEpisode}
-                  onPlayNext={() => currentNextEpisode && handlePlay(currentNextEpisode)}
-                />
-              ) : null}
-              <div className="panel space-y-4 p-4 lg:p-5">
-                <SectionTabs activeSection={state.section as PlaylistSection} onChange={setSection} />
-                {state.section !== "settings" ? (
-                  <div className="grid gap-2 md:grid-cols-[1fr_auto]">
-                    <SearchBar
-                      value={filters.query}
-                      resultCount={currentResultCount}
-                      placeholder={
-                        state.section === "live"
-                          ? "Search channels..."
-                          : state.section === "movies"
-                            ? "Search movies..."
-                            : state.section === "series"
-                              ? "Search series and episodes..."
-                              : state.section === "catchup"
-                                ? "Search catch-up content..."
-                                : state.section === "favorites"
-                                  ? "Search favorites..."
-                                  : state.section === "recents"
-                                    ? "Search recently played..."
-                                    : "Search continue watching..."
-                      }
-                      onChange={(query) => setFilters((prev) => ({ ...prev, query }))}
-                    />
-                    {["live", "movies", "series", "catchup"].includes(state.section) ? (
-                      <FilterBar
-                        groups={groups}
-                        selectedGroup={filters.selectedGroup}
-                        favoritesOnly={filters.favoritesOnly}
-                        groupLabel={state.section === "live" ? "Category" : "Group"}
-                        includeAllOption
-                        allOptionLabel="Everything"
-                        onGroupChange={(group) => setFilters((prev) => ({ ...prev, selectedGroup: group }))}
-                        onToggleFavorites={() => setFilters((prev) => ({ ...prev, favoritesOnly: !prev.favoritesOnly }))}
-                      />
-                    ) : (
-                      <div />
-                    )}
-                  </div>
-                ) : null}
-                {importError ? <ErrorState message={importError} onRetry={() => setImportError(null)} /> : null}
-                {storageError ? <ErrorState message={storageError} /> : null}
-                {deepLinkError ? (
-                  <ErrorState
-                    message={deepLinkError}
-                    actionLabel="Go to home"
-                    onRetry={() => {
-                      setDeepLinkError(null);
-                      navigate("/", { replace: true });
-                    }}
-                  />
-                ) : null}
-                {renderSection()}
-              </div>
-            </div>
-            <div className="space-y-5">
+            ) : null}
+            {importError ? <ErrorState message={importError} onRetry={() => setImportError(null)} /> : null}
+            {storageError ? <ErrorState message={storageError} /> : null}
+            {deepLinkError ? (
+              <ErrorState
+                message={deepLinkError}
+                actionLabel="Go to home"
+                onRetry={() => {
+                  setDeepLinkError(null);
+                  navigate("/", { replace: true });
+                }}
+              />
+            ) : null}
+          </div>
+          {state.settings.rightPanelOpen ? (
+            <div className="flex h-full min-h-0 flex-col gap-3 overflow-hidden">
               <PlaylistManager
                 playlists={state.playlists}
                 activePlaylistId={state.activePlaylistId}
@@ -970,6 +920,7 @@ const App = () => {
                 }}
                 onRename={renamePlaylist}
                 onRefresh={refreshPlaylist}
+                onAddPlaylist={() => setImportOpen(true)}
               />
               <DetailsPanel
                 item={playerState.currentItem}
@@ -978,9 +929,31 @@ const App = () => {
                 onGoToBrowse={goToBrowseFromDetails}
               />
             </div>
-          </div>
-        </main>
-      </div>
+          ) : null}
+        </div>
+      </main>
+      <SearchOverlay
+        open={searchOpen}
+        onClose={closeSearch}
+        initialFocus={searchFocus}
+        settingsPanel={settingsPanel}
+        playlistItems={playlistItems}
+        groupedSeries={allSeriesForPlaylist}
+        favoritesItems={favoritesItems}
+        recentsItems={recentsItems}
+        continueItems={continueItems}
+        favoriteSet={favoriteSet}
+        favoriteSeriesIds={favoriteSeriesIds}
+        progressByItemId={progressByItemId}
+        loadingSeriesId={loadingSeriesId}
+        activeItemId={playerState.currentItem?.id}
+        onPlay={handleSearchPlay}
+        onToggleFavorite={handleToggleFavorite}
+        onToggleFavoriteSeries={handleToggleFavoriteSeries}
+        onEnsureSeriesLoaded={(seriesId) => {
+          void ensureSeriesLoaded(seriesId);
+        }}
+      />
       <PlaylistImportModal
         open={importOpen}
         loading={importing}

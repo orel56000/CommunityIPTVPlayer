@@ -150,7 +150,7 @@ interface SeriesDetailViewProps {
   onToggleFavorite: () => void;
 }
 
-const SeriesDetailView = ({
+export const SeriesDetailView = ({
   show,
   activeEpisodeId,
   loading = false,

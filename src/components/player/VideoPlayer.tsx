@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import clsx from "clsx";
 import Hls from "hls.js";
 import mpegts from "mpegts.js";
 import type { PlaylistItem } from "../../types/models";
@@ -20,6 +21,7 @@ interface VideoPlayerProps {
   onProgress: (positionSec: number, durationSec: number) => void;
   onEnded: () => void;
   resumeFrom: number;
+  className?: string;
 }
 
 const CONTROLS_HIDE_MS = 2400;
@@ -300,6 +302,7 @@ export const VideoPlayer = ({
   onProgress,
   onEnded,
   resumeFrom,
+  className,
 }: VideoPlayerProps) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -1197,10 +1200,10 @@ export const VideoPlayer = ({
   }, [item]);
 
   return (
-    <div className="panel overflow-hidden">
+    <div className={clsx("panel flex min-h-0 flex-col overflow-hidden", className)}>
       <div
         ref={containerRef}
-        className="group/player relative aspect-video w-full bg-black"
+        className="player-viewport group/player relative"
         onPointerMove={bumpControls}
         onPointerLeave={() => {
           if (displayPlaying && !displayLoading && !localError) setControlsVisible(false);
@@ -1210,7 +1213,7 @@ export const VideoPlayer = ({
       >
         <video
           ref={videoRef}
-          className="h-full w-full"
+          className="max-h-full max-w-full object-contain"
           controls={false}
           playsInline
           onClick={togglePlay}

@@ -1,4 +1,4 @@
-import { Download, Pencil, RefreshCw, Trash2 } from "lucide-react";
+import { Download, Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
 import clsx from "clsx";
 import type { SavedPlaylist } from "../../types/models";
 import { formatRelative } from "../../utils/time";
@@ -11,6 +11,7 @@ interface PlaylistManagerProps {
   onDownload: (playlistId: string) => void;
   onRename: (playlistId: string) => void;
   onRefresh: (playlistId: string) => void;
+  onAddPlaylist: () => void;
 }
 
 export const PlaylistManager = ({
@@ -21,9 +22,16 @@ export const PlaylistManager = ({
   onRename,
   onSelect,
   onRefresh,
+  onAddPlaylist,
 }: PlaylistManagerProps) => (
-  <div className="panel space-y-3 p-4">
-    <h3 className="text-sm font-semibold tracking-tight text-slate-100">Saved playlists</h3>
+  <div className="panel panel-scroll min-h-0 max-h-[42%] shrink-0 space-y-3 overflow-x-hidden p-4">
+    <div className="flex items-center justify-between gap-2">
+      <h3 className="text-sm font-semibold tracking-tight text-slate-100">Saved playlists</h3>
+      <button className="btn btn-primary px-2.5 py-1.5 text-xs" type="button" onClick={onAddPlaylist}>
+        <Plus size={14} />
+        Add playlist
+      </button>
+    </div>
     {!playlists.length ? <p className="text-sm text-slate-500">No playlists saved yet.</p> : null}
     {playlists.map((playlist) => (
       <div

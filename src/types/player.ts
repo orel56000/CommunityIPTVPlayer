@@ -20,6 +20,7 @@ export interface AppSettings {
   volumePercentMode: boolean;
   theme: "dark" | "light";
   sidebarCollapsed: boolean;
+  rightPanelOpen: boolean;
 }
 
 export interface UIFilters {

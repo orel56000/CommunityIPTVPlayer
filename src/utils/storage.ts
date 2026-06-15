@@ -10,6 +10,11 @@ import type { AppSettings } from "../types/player";
 const STORAGE_KEY = "iptv-player-state-v1";
 const clampVolume = (value: number): number => Math.min(2, Math.max(0, value));
 
+export interface LastPlayedWatch {
+  playlistName: string;
+  shareId: string;
+}
+
 export interface PersistedState {
   playlists: SavedPlaylist[];
   activePlaylistId: string | null;
@@ -19,6 +24,7 @@ export interface PersistedState {
   continueWatching: ContinueWatchingEntry[];
   settings: AppSettings;
   lastPlayedId: string | null;
+  lastPlayedWatch: LastPlayedWatch | null;
   section: string;
 }
 
@@ -36,8 +42,10 @@ const defaultState: PersistedState = {
     volumePercentMode: false,
     theme: "dark",
     sidebarCollapsed: false,
+    rightPanelOpen: true,
   },
   lastPlayedId: null,
+  lastPlayedWatch: null,
   section: "live",
 };
 
@@ -112,6 +120,15 @@ export const storage = {
               ? parsed.settings.volumePercentMode
               : defaultState.settings.volumePercentMode,
         },
+        lastPlayedWatch:
+          parsed.lastPlayedWatch &&
+          typeof parsed.lastPlayedWatch.playlistName === "string" &&
+          typeof parsed.lastPlayedWatch.shareId === "string"
+            ? {
+                playlistName: parsed.lastPlayedWatch.playlistName,
+                shareId: parsed.lastPlayedWatch.shareId,
+              }
+            : defaultState.lastPlayedWatch,
       };
     } catch {
       return defaultState;

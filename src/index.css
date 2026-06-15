@@ -6,8 +6,13 @@
   color-scheme: dark;
 }
 
+html {
+  height: 100%;
+  overflow: hidden;
+}
+
 body {
-  @apply m-0 min-h-screen font-sans text-slate-100 antialiased;
+  @apply m-0 h-full overflow-hidden font-sans text-slate-100 antialiased;
   background-color: #030712;
   background-image:
     radial-gradient(ellipse 100% 70% at 0% -10%, rgba(34, 211, 238, 0.14), transparent 52%),
@@ -17,7 +22,7 @@ body {
 }
 
 #root {
-  @apply min-h-screen;
+  @apply h-full overflow-hidden;
 }
 
 html.light {
@@ -54,6 +59,115 @@ html.light .control-btn {
 
 html.light header {
   @apply border-slate-200/70 bg-white/75 text-slate-900;
+}
+
+.glass-search-trigger {
+  @apply inline-flex w-auto max-w-[min(100vw-12rem,28rem)] items-center gap-2.5 rounded-full border border-white/[0.12] bg-gradient-to-b from-white/[0.1] to-white/[0.05] px-5 py-2.5 text-left shadow-lg shadow-black/25 backdrop-blur-2xl transition duration-200;
+  @apply hover:border-cyan-400/30 hover:from-white/[0.14] hover:to-white/[0.07] hover:shadow-cyan-500/10;
+  @apply focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/45;
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.06) inset,
+    0 12px 40px -12px rgba(0, 0, 0, 0.55),
+    0 0 24px -8px rgba(34, 211, 238, 0.08);
+}
+
+.search-overlay-root {
+  @apply fixed inset-0 z-50 flex items-start justify-center p-3 pt-[max(0.75rem,env(safe-area-inset-top))] sm:p-6 sm:pt-20;
+}
+
+.search-overlay-backdrop {
+  @apply absolute inset-0 border-0 bg-slate-950/75 backdrop-blur-md;
+}
+
+.search-overlay-panel {
+  @apply relative z-10 flex max-h-[min(88vh,820px)] min-w-0 w-full max-w-3xl flex-col overflow-hidden rounded-3xl border border-white/[0.1] bg-slate-900/55 shadow-2xl shadow-black/50 backdrop-blur-2xl;
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.06) inset,
+    0 32px 64px -24px rgba(0, 0, 0, 0.65);
+  animation: search-overlay-in 0.22s ease-out;
+}
+
+@keyframes search-overlay-in {
+  from {
+    opacity: 0;
+    transform: translateY(-8px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.search-overlay-header {
+  @apply flex shrink-0 items-center gap-2 border-b border-white/[0.06] p-3 sm:p-4;
+}
+
+.search-overlay-input {
+  @apply w-full rounded-2xl border border-white/[0.08] bg-white/[0.05] py-3 pl-11 pr-10 text-sm text-slate-100 placeholder:text-slate-500;
+  @apply focus:border-cyan-500/35 focus:outline-none focus:ring-2 focus:ring-cyan-500/20;
+}
+
+.search-overlay-categories {
+  @apply flex shrink-0 gap-1.5 overflow-x-auto border-b border-white/[0.05] px-3 py-2.5 sm:px-4 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden;
+}
+
+.search-overlay-category {
+  @apply shrink-0 rounded-xl border border-transparent px-3 py-1.5 text-xs font-semibold text-slate-400 transition duration-200;
+  @apply hover:bg-white/[0.06] hover:text-slate-200;
+}
+
+.search-overlay-category-active {
+  @apply border-cyan-500/30 bg-cyan-500/15 text-cyan-100;
+}
+
+.search-overlay-groups {
+  @apply flex shrink-0 gap-1.5 overflow-x-auto px-3 py-2 sm:px-4 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden;
+}
+
+.search-overlay-group {
+  @apply shrink-0 rounded-lg border border-white/[0.06] bg-white/[0.03] px-2.5 py-1 text-[11px] font-medium text-slate-400 transition;
+  @apply hover:border-white/10 hover:text-slate-200;
+}
+
+.search-overlay-group-active {
+  @apply border-cyan-500/25 bg-cyan-500/10 text-cyan-100;
+}
+
+.search-overlay-meta {
+  @apply shrink-0 px-4 py-2;
+}
+
+.search-overlay-results {
+  @apply min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-1 pb-2 sm:px-2;
+}
+
+.search-overlay-empty {
+  @apply flex flex-col items-center justify-center px-6 py-16 text-center;
+}
+
+html.light .glass-search-trigger {
+  @apply border-slate-200/80 bg-white/70 text-slate-600 shadow-slate-300/30 hover:border-sky-300/50;
+}
+
+.now-playing-chip {
+  @apply flex max-w-[min(100%,15rem)] items-center gap-2 rounded-2xl border border-white/[0.1] bg-gradient-to-b from-white/[0.1] to-white/[0.04] px-2 py-1.5 text-left shadow-md shadow-black/20 backdrop-blur-xl transition duration-200 sm:max-w-[18rem] sm:gap-2.5 sm:px-2.5 sm:py-2;
+  @apply hover:border-cyan-400/35 hover:from-white/[0.14] hover:to-white/[0.07] hover:shadow-cyan-500/10;
+  @apply focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/45;
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.05) inset,
+    0 8px 24px -10px rgba(0, 0, 0, 0.45);
+}
+
+html.light .now-playing-chip {
+  @apply border-slate-200/80 bg-white/80 text-slate-900 shadow-slate-300/25 hover:border-sky-300/50;
+}
+
+html.light .search-overlay-panel {
+  @apply border-slate-200/90 bg-white/90 text-slate-900;
+}
+
+html.light .search-overlay-input {
+  @apply border-slate-200 bg-white text-slate-900;
 }
 
 html.light header .rounded-full {
@@ -105,4 +219,34 @@ html.light aside {
 
 .card-tile-active {
   @apply border-cyan-400/50 shadow-glow-cyan ring-2 ring-cyan-400/30;
+}
+
+.player-viewport {
+  @apply flex min-h-0 flex-1 items-center justify-center bg-black;
+}
+
+.panel-scroll {
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(100, 116, 139, 0.45) transparent;
+}
+
+.panel-scroll::-webkit-scrollbar {
+  width: 6px;
+}
+
+.panel-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.panel-scroll::-webkit-scrollbar-thumb {
+  background: rgba(100, 116, 139, 0.4);
+  border-radius: 9999px;
+}
+
+.panel-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.55);
 }
