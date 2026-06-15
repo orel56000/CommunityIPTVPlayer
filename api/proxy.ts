@@ -1,4 +1,4 @@
-import { parseProxyTarget } from "./proxyShared";
+import { parseProxyTarget } from "./proxyShared.js";
 
 export const config = {
   runtime: "edge",

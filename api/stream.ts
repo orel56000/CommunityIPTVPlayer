@@ -1,4 +1,4 @@
-import { applyIptvStreamHeaders, parseProxyTarget } from "./proxyShared";
+import { applyIptvStreamHeaders, parseProxyTarget } from "./proxyShared.js";
 
 export const config = {
   runtime: "edge",

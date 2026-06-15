@@ -5,7 +5,7 @@ import { mkdir, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import ffmpegPath from "ffmpeg-static";
-import { IPTV_STREAM_USER_AGENT } from "./proxyShared";
+import { IPTV_STREAM_USER_AGENT } from "./proxyShared.js";
 
 export interface RestreamSession {
   id: string;
@@ -107,7 +107,8 @@ const killProcess = (process: ChildProcess): void => {
 };
 
 const runFfmpegSession = async (sourceUrl: string, transcode: boolean): Promise<RestreamSession> => {
-  if (!ffmpegPath) {
+  const ffmpegBinary = typeof ffmpegPath === "string" ? ffmpegPath : null;
+  if (!ffmpegBinary) {
     throw new Error("ffmpeg binary not found. Install ffmpeg-static or system ffmpeg.");
   }
 
@@ -117,7 +118,7 @@ const runFfmpegSession = async (sourceUrl: string, transcode: boolean): Promise<
   await mkdir(outputDir, { recursive: true });
 
   const manifestPath = manifestPathFor(outputDir);
-  const process = spawn(ffmpegPath, buildFfmpegArgs(sourceUrl, outputDir, transcode), {
+  const process = spawn(ffmpegBinary, buildFfmpegArgs(sourceUrl, outputDir, transcode), {
     stdio: ["ignore", "ignore", "pipe"],
   });
 

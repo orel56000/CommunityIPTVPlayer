@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { parseProxyTarget } from "./proxyShared";
+import { parseProxyTarget } from "./proxyShared.js";
 import {
   getOrStartRestreamSession,
   invalidateRestreamSession,
@@ -7,7 +7,7 @@ import {
   readRestreamSegment,
   rewriteRestreamManifest,
   touchRestreamSession,
-} from "./restreamManager";
+} from "./restreamManager.js";
 
 const loadRestreamManifest = async (sourceUrl: string): Promise<{ sessionId: string; manifest: string }> => {
   let lastError: unknown;

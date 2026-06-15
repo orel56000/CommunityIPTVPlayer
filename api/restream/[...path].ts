@@ -1,4 +1,4 @@
-import { handleRestreamWebRequest } from "../restreamHandler";
+import { handleRestreamWebRequest } from "../restreamHandler.js";
 
 export const config = {
   runtime: "nodejs",
