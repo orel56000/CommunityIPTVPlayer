@@ -8,6 +8,7 @@ import type {
 import type { AppSettings } from "../types/player";
 
 const STORAGE_KEY = "iptv-player-state-v1";
+const clampVolume = (value: number): number => Math.min(2, Math.max(0, value));
 
 export interface PersistedState {
   playlists: SavedPlaylist[];
@@ -89,13 +90,20 @@ export const storage = {
         settings: {
           ...defaultState.settings,
           ...(parsed.settings ?? {}),
+          defaultVolume: (() => {
+            const s = (parsed.settings ?? {}) as Partial<AppSettings>;
+            if (typeof s.defaultVolume === "number" && Number.isFinite(s.defaultVolume)) {
+              return clampVolume(s.defaultVolume);
+            }
+            return defaultState.settings.defaultVolume;
+          })(),
           rememberedVolume: (() => {
             const s = (parsed.settings ?? {}) as Partial<AppSettings>;
             if (typeof s.rememberedVolume === "number" && Number.isFinite(s.rememberedVolume)) {
-              return Math.min(1, Math.max(0, s.rememberedVolume));
+              return clampVolume(s.rememberedVolume);
             }
             if (typeof s.defaultVolume === "number" && Number.isFinite(s.defaultVolume)) {
-              return Math.min(1, Math.max(0, s.defaultVolume));
+              return clampVolume(s.defaultVolume);
             }
             return defaultState.settings.rememberedVolume;
           })(),

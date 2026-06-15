@@ -138,6 +138,19 @@ const buildPlayerApiUrl = (config: XtreamSourceConfig, action?: string, extra?: 
 const buildLiveStreamUrl = (config: XtreamSourceConfig, streamId: string): string =>
   `${trimTrailingSlash(config.host)}/live/${encodeURIComponent(config.username)}/${encodeURIComponent(config.password)}/${encodeURIComponent(streamId)}.${config.output === "m3u8" ? "m3u8" : "ts"}`;
 
+const resolveXtreamLiveOutput = (
+  preferred: XtreamSourceConfig["output"],
+  allowedFormats?: string[],
+): NonNullable<XtreamSourceConfig["output"]> => {
+  const choice = preferred ?? "ts";
+  if (!allowedFormats?.length) return choice;
+  const normalized = allowedFormats.map((format) => format.toLowerCase());
+  if (normalized.includes(choice)) return choice;
+  if (normalized.includes("ts")) return "ts";
+  if (normalized.includes("m3u8") || normalized.includes("hls")) return "m3u8";
+  return choice;
+};
+
 const buildMovieStreamUrl = (config: XtreamSourceConfig, streamId: string, extension?: string): string => {
   const container = nonEmpty(extension) ?? "mp4";
   return `${trimTrailingSlash(config.host)}/movie/${encodeURIComponent(config.username)}/${encodeURIComponent(config.password)}/${encodeURIComponent(streamId)}.${container}`;
@@ -313,13 +326,19 @@ export const importXtreamPlaylist = async (
 
   onStatus?.("Checking Xtream account...");
   setProgress(2);
-  const account = await fetchJson<{ user_info?: { auth?: number | string; status?: string } }>(buildPlayerApiUrl(config));
+  const account = await fetchJson<{
+    user_info?: { auth?: number | string; status?: string; allowed_output_formats?: string[] };
+  }>(buildPlayerApiUrl(config));
   if (String(account.user_info?.auth ?? "0") !== "1") {
     throw new Error("Xtream credentials were rejected by the provider.");
   }
   if (nonEmpty(account.user_info?.status) && account.user_info?.status !== "Active") {
     errors.push(`Account status is ${account.user_info?.status}. Some streams may fail.`);
   }
+  const resolvedConfig: XtreamSourceConfig = {
+    ...config,
+    output: resolveXtreamLiveOutput(config.output, account.user_info?.allowed_output_formats),
+  };
 
   onStatus?.("Loading live TV catalog...");
   const [liveCategories, liveStreams] = await Promise.all([
@@ -355,7 +374,7 @@ export const importXtreamPlaylist = async (
     const groupTitle = liveCategoryById.get(toText(stream.category_id)) ?? "Ungrouped";
     const archiveDays = nonEmpty(stream.tv_archive_duration);
     const logo = proxifyRemoteAssetUrl(nonEmpty(stream.stream_icon));
-    const streamUrl = buildLiveStreamUrl(config, streamId);
+    const streamUrl = buildLiveStreamUrl(resolvedConfig, streamId);
     const metadata = toStringRecord(stream, ["name", "stream_icon", "category_id"]);
     const baseItem: PlaylistItem = {
       id: makeItemId(playlistId, "live", streamId),

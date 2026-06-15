@@ -158,7 +158,7 @@ export const PlayerOverlay = ({
     if (raw.trim() === "") return;
     const n = Number.parseInt(raw, 10);
     if (Number.isNaN(n)) return;
-    onVolume(Math.min(100, Math.max(0, n)) / 100);
+    onVolume(Math.min(200, Math.max(0, n)) / 100);
   };
   const volumePercentKey = `${volumePercent}-${muted ? 1 : 0}`;
 
@@ -301,7 +301,7 @@ export const PlayerOverlay = ({
                   id="player-volume-pct"
                   type="number"
                   min={0}
-                  max={100}
+                  max={200}
                   step={1}
                   defaultValue={volumePercent}
                   onBlur={(event) => applyVolumePercent(event.target.value)}
@@ -315,7 +315,7 @@ export const PlayerOverlay = ({
                 <input
                   type="range"
                   min={0}
-                  max={1}
+                  max={2}
                   step={0.01}
                   value={muted ? 0 : volume}
                   onChange={(event) => onVolume(Number(event.target.value))}
@@ -332,7 +332,7 @@ export const PlayerOverlay = ({
                 <input
                   type="range"
                   min={0}
-                  max={1}
+                  max={2}
                   step={0.01}
                   value={muted ? 0 : volume}
                   onChange={(event) => onVolume(Number(event.target.value))}

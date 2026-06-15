@@ -21,7 +21,7 @@ export const PlaylistImportModal = ({
   onSubmit,
 }: PlaylistImportModalProps) => {
   const [name, setName] = useState("");
-  const [sourceType, setSourceType] = useState<PlaylistSource["type"]>("url");
+  const [sourceType, setSourceType] = useState<PlaylistSource["type"]>("xtream");
   const [url, setUrl] = useState("");
   const [rawText, setRawText] = useState("");
   const [fileName, setFileName] = useState("");
@@ -29,7 +29,7 @@ export const PlaylistImportModal = ({
   const [xtreamHost, setXtreamHost] = useState("");
   const [xtreamUsername, setXtreamUsername] = useState("");
   const [xtreamPassword, setXtreamPassword] = useState("");
-  const [xtreamOutput, setXtreamOutput] = useState<"ts" | "m3u8">("m3u8");
+  const [xtreamOutput, setXtreamOutput] = useState<"ts" | "m3u8">("ts");
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   if (!open) return null;
@@ -82,9 +82,9 @@ export const PlaylistImportModal = ({
           </button>
         </div>
         <input className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder="Playlist name" />
-        <div className="flex gap-2">
-          <button className={`btn ${sourceType === "url" ? "btn-primary" : ""}`} onClick={() => setSourceType("url")} type="button">
-            URL
+        <div className="flex flex-wrap gap-2">
+          <button className={`btn ${sourceType === "xtream" ? "btn-primary" : ""}`} onClick={() => setSourceType("xtream")} type="button">
+            Xtream Recommended
           </button>
           <button className={`btn ${sourceType === "raw" ? "btn-primary" : ""}`} onClick={() => setSourceType("raw")} type="button">
             Raw M3U
@@ -92,10 +92,13 @@ export const PlaylistImportModal = ({
           <button className={`btn ${sourceType === "file" ? "btn-primary" : ""}`} onClick={() => setSourceType("file")} type="button">
             File
           </button>
-          <button className={`btn ${sourceType === "xtream" ? "btn-primary" : ""}`} onClick={() => setSourceType("xtream")} type="button">
-            Xtream
+          <button className={`btn ${sourceType === "url" ? "btn-primary" : ""}`} onClick={() => setSourceType("url")} type="button">
+            URL
           </button>
         </div>
+        <p className="text-xs text-slate-500">
+          Xtream is recommended when your provider gives you `player_api.php` credentials because it imports faster and keeps series details lazy-loaded.
+        </p>
         {sourceType === "url" ? (
           <div className="space-y-2">
             <input
@@ -170,14 +173,14 @@ export const PlaylistImportModal = ({
               <select
                 className="input"
                 value={xtreamOutput}
-                onChange={(e) => setXtreamOutput(e.target.value === "ts" ? "ts" : "m3u8")}
+                onChange={(e) => setXtreamOutput(e.target.value === "m3u8" ? "m3u8" : "ts")}
               >
+                <option value="ts">MPEG-TS (.ts) — recommended for live TV</option>
                 <option value="m3u8">HLS (.m3u8)</option>
-                <option value="ts">MPEG-TS (.ts)</option>
               </select>
             </label>
             <p className="md:col-span-2 text-xs text-slate-500">
-              Uses `player_api.php` for categories, live channels, VOD, series, catch-up flags, and artwork.
+              Uses `player_api.php` for categories, live channels, VOD, series, catch-up flags, and artwork. Native IPTV apps (Vu Player, TiviMate, IPTV Smarters) use MPEG-TS for live streams by default.
             </p>
           </div>
         ) : null}

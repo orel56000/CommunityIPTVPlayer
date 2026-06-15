@@ -1,4 +1,4 @@
-import { parseProxyTarget } from "./proxyShared";
+import { applyIptvStreamHeaders, parseProxyTarget } from "./proxyShared";
 
 export const config = {
   runtime: "edge",
@@ -27,6 +27,7 @@ export default async function handler(request: Request): Promise<Response> {
   if (!upstreamRequestHeaders.has("referer")) {
     upstreamRequestHeaders.set("referer", `${target.protocol}//${target.host}/`);
   }
+  applyIptvStreamHeaders(upstreamRequestHeaders, target);
 
   const upstream = await fetch(target.toString(), {
     method: "GET",

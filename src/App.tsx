@@ -243,7 +243,7 @@ const App = () => {
 
   const handlePlayerVolume = useCallback(
     (next: number) => {
-      const clamped = Math.min(1, Math.max(0, next));
+      const clamped = Math.min(2, Math.max(0, next));
       setVolume(clamped);
       if (clamped > 0 && playerState.muted) setMuted(false);
     },

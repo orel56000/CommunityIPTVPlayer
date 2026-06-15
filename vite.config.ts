@@ -2,7 +2,7 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { Readable } from "node:stream";
 import type { ReadableStream as WebReadableStream } from "node:stream/web";
-import { parseProxyTarget } from "./api/proxyShared";
+import { applyIptvStreamHeaders, parseProxyTarget } from "./api/proxyShared";
 
 const copyHeader = (source: Headers, target: import("node:http").OutgoingHttpHeaders, name: string): void => {
   const value = source.get(name);
@@ -68,6 +68,15 @@ export default defineConfig({
           }
         });
 
+        server.middlewares.use("/api/restream", async (req, res) => {
+          const { handleRestreamNodeRequest } = await import("./api/restreamHandler");
+          const handled = await handleRestreamNodeRequest(req, res);
+          if (!handled && !res.headersSent) {
+            res.statusCode = 404;
+            res.end("Not found");
+          }
+        });
+
         server.middlewares.use("/api/stream", async (req, res) => {
           try {
             const reqUrl = new URL(req.url ?? "", "http://localhost");
@@ -83,6 +92,7 @@ export default defineConfig({
             if (req.headers.range) upstreamHeaders.set("range", req.headers.range);
             if (req.headers.accept) upstreamHeaders.set("accept", req.headers.accept);
             upstreamHeaders.set("referer", `${target.protocol}//${target.host}/`);
+            applyIptvStreamHeaders(upstreamHeaders, target);
 
             const upstream = await fetch(target.toString(), {
               method: "GET",

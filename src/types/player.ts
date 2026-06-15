@@ -12,9 +12,9 @@ export interface PlayerState {
 
 export interface AppSettings {
   autoplay: boolean;
-  /** Initial volume for new installs / reset. */
+  /** Initial playback volume for new installs / reset (0-2 = 0%-200%). */
   defaultVolume: number;
-  /** Last used playback volume (0–1), persisted between visits. */
+  /** Last used playback volume (0-2 = 0%-200%), persisted between visits. */
   rememberedVolume: number;
   /** When true, player shows % and a numeric field plus a compact slider. */
   volumePercentMode: boolean;

@@ -13,3 +13,4 @@ vite.config.d.ts
 *.log
 =======
 >>>>>>> Stashed changes
+*.bin

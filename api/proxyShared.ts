@@ -1,3 +1,13 @@
+export const IPTV_STREAM_USER_AGENT = "Mozilla/5.0 (Linux; Android 11) AppleWebKit/537.36 ExoPlayerLib/2.18.1";
+
+export const applyIptvStreamHeaders = (headers: Headers, target: URL): void => {
+  headers.set("user-agent", IPTV_STREAM_USER_AGENT);
+  headers.set("accept", "*/*");
+  if (!headers.has("referer")) {
+    headers.set("referer", `${target.protocol}//${target.host}/`);
+  }
+};
+
 export const isBlockedHost = (hostname: string): boolean => {
   const host = hostname.toLowerCase();
   if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local")) return true;
