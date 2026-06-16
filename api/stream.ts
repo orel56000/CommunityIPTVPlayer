@@ -1,62 +1,82 @@
+import type { IncomingMessage, ServerResponse } from "node:http";
+import { Readable } from "node:stream";
+import type { ReadableStream as WebReadableStream } from "node:stream/web";
 import { applyIptvStreamHeaders, parseProxyTarget } from "./proxyShared.js";
 
-// Same-origin relay: the browser requests /api/stream?url=<upstream>, this
-// function fetches the upstream stream server-side (player User-Agent, follows
-// redirects) and pipes the bytes back. That removes the browser's CORS / mixed
-// content limits. NOTE: on a cloud host the upstream sees THIS server's IP, so
-// providers that lock to a residential IP will reject it (works from localhost).
+// Same-origin relay: the browser requests /api/stream?url=<upstream>; this
+// fetches the upstream server-side (player User-Agent, follows redirects) and
+// pipes the bytes back, removing the browser's CORS / mixed-content limits.
+//
+// Uses the classic Node (req, res) handler + stream.pipe — the most reliable
+// form on Vercel's Node runtime for streaming/large responses. (The Web-style
+// Request->Response handler returned 500 here.)
+//
+// NOTE: works for finite content (VOD with range requests). A never-ending
+// live .ts will hit maxDuration; live uses the ffmpeg restream instead.
 export const config = {
-  runtime: "nodejs",
   maxDuration: 60,
 };
 
-const copyHeader = (from: Headers, to: Headers, name: string): void => {
+const firstHeader = (value: string | string[] | undefined): string | undefined =>
+  Array.isArray(value) ? value[0] : value;
+
+const copyHeader = (from: Headers, res: ServerResponse, name: string): void => {
   const value = from.get(name);
-  if (value) to.set(name, value);
+  if (value) res.setHeader(name, value);
 };
 
-export default async function handler(request: Request): Promise<Response> {
-  const requestUrl = new URL(request.url);
-  const result = parseProxyTarget(requestUrl.searchParams.get("url"));
+export default async function handler(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const reqUrl = new URL(req.url ?? "", "http://localhost");
+  const result = parseProxyTarget(reqUrl.searchParams.get("url"));
   if (!result.ok) {
-    return new Response(result.message, { status: result.status });
+    res.statusCode = result.status;
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.end(result.message);
+    return;
   }
   const { target } = result;
 
-  const upstreamRequestHeaders = new Headers();
-  copyHeader(request.headers, upstreamRequestHeaders, "range");
-  copyHeader(request.headers, upstreamRequestHeaders, "accept");
-  upstreamRequestHeaders.set("referer", `${target.protocol}//${target.host}/`);
-  applyIptvStreamHeaders(upstreamRequestHeaders, target);
+  const upstreamHeaders = new Headers();
+  const range = firstHeader(req.headers.range);
+  const accept = firstHeader(req.headers.accept);
+  if (range) upstreamHeaders.set("range", range);
+  if (accept) upstreamHeaders.set("accept", accept);
+  upstreamHeaders.set("referer", `${target.protocol}//${target.host}/`);
+  applyIptvStreamHeaders(upstreamHeaders, target);
 
   let upstream: Response;
   try {
     upstream = await fetch(target.toString(), {
       method: "GET",
-      headers: upstreamRequestHeaders,
+      headers: upstreamHeaders,
       redirect: "follow",
       cache: "no-store",
     });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Upstream fetch failed";
-    return new Response(`Relay could not reach the provider: ${message}`, {
-      status: 502,
-      headers: { "Access-Control-Allow-Origin": "*" },
-    });
+    res.statusCode = 502;
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.end(`Relay could not reach the provider: ${error instanceof Error ? error.message : "fetch failed"}`);
+    return;
   }
 
-  const responseHeaders = new Headers();
-  copyHeader(upstream.headers, responseHeaders, "content-type");
-  copyHeader(upstream.headers, responseHeaders, "content-length");
-  copyHeader(upstream.headers, responseHeaders, "accept-ranges");
-  copyHeader(upstream.headers, responseHeaders, "content-range");
-  copyHeader(upstream.headers, responseHeaders, "cache-control");
-  responseHeaders.set("Access-Control-Allow-Origin", "*");
-  responseHeaders.set("Cross-Origin-Resource-Policy", "cross-origin");
+  res.statusCode = upstream.status;
+  copyHeader(upstream.headers, res, "content-type");
+  copyHeader(upstream.headers, res, "content-length");
+  copyHeader(upstream.headers, res, "accept-ranges");
+  copyHeader(upstream.headers, res, "content-range");
+  copyHeader(upstream.headers, res, "cache-control");
+  res.setHeader("Access-Control-Allow-Origin", "*");
 
-  return new Response(upstream.body, {
-    status: upstream.status,
-    statusText: upstream.statusText,
-    headers: responseHeaders,
+  if (!upstream.body) {
+    res.end();
+    return;
+  }
+
+  const nodeStream = Readable.fromWeb(upstream.body as WebReadableStream<Uint8Array>);
+  nodeStream.on("error", () => {
+    if (!res.headersSent) res.statusCode = 502;
+    res.end();
   });
+  req.on("close", () => nodeStream.destroy());
+  nodeStream.pipe(res);
 }
