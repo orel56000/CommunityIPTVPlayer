@@ -5,7 +5,8 @@ import mpegts from "mpegts.js";
 import type { PlaylistItem } from "../../types/models";
 import { useChromecast } from "../../hooks/useChromecast";
 import { downloadMediaFile, isHlsUrl } from "../../utils/downloadStream";
-import { resolveStreamPlaybackUrl } from "../../utils/proxyUrl";
+import { categoryForSection, writeHttpsCapability } from "../../utils/httpsCapability";
+import { toRelayUrl } from "../../utils/secureUrl";
 import { buildLivePlaybackAttempts, toXtreamTsUrl } from "../../utils/xtreamStreamUrl";
 import { PlayerOverlay } from "./PlayerOverlay";
 
@@ -28,6 +29,8 @@ interface VideoPlayerProps {
 const CONTROLS_HIDE_MS = 2400;
 const SOURCE_STARTUP_TIMEOUT_MS = 12000;
 const MPEGTS_STARTUP_TIMEOUT_MS = 25000;
+// ffmpeg needs time to spawn and produce the first HLS segments.
+const RESTREAM_STARTUP_TIMEOUT_MS = 35000;
 
 const isTransportStreamUrl = (url: string): boolean => {
   const lower = url.toLowerCase();
@@ -59,16 +62,16 @@ const modeLabel = (mode: PlaybackMode): string =>
   mode === "hls" ? "hls.js" : mode === "mpegts" ? "mpegts.js" : "native-video";
 
 /** hls.js tuning for live TV — prioritize smooth playback over minimum latency. */
-const createLiveHls = (viaRestream: boolean): Hls =>
+const createLiveHls = (): Hls =>
   new Hls({
     enableWorker: true,
     lowLatencyMode: false,
     backBufferLength: 60,
-    maxBufferLength: viaRestream ? 90 : 60,
+    maxBufferLength: 60,
     maxMaxBufferLength: 120,
     // Stay a few segments behind the live edge so the buffer does not run dry.
-    liveSyncDurationCount: viaRestream ? 6 : 4,
-    liveMaxLatencyDurationCount: viaRestream ? 18 : 12,
+    liveSyncDurationCount: 4,
+    liveMaxLatencyDurationCount: 12,
     maxLiveSyncPlaybackRate: 1.15,
     liveDurationInfinity: true,
     manifestLoadingTimeOut: 20_000,
@@ -77,6 +80,19 @@ const createLiveHls = (viaRestream: boolean): Hls =>
     fragLoadingTimeOut: 30_000,
     fragLoadingMaxRetry: 8,
   });
+
+/** mpegts.js tuning for direct live MPEG-TS (.ts) playback from the provider. */
+const createLiveMpegTs = (url: string): ReturnType<typeof mpegts.createPlayer> =>
+  mpegts.createPlayer(
+    { type: "mpegts", url, isLive: true, cors: true, withCredentials: false },
+    {
+      isLive: true,
+      enableStashBuffer: false,
+      stashInitialSize: 128 * 1024,
+      lazyLoad: false,
+      liveBufferLatencyChasing: true,
+    },
+  );
 
 const mediaErrorName = (code?: number): string => {
   switch (code) {
@@ -181,10 +197,7 @@ const userMessageFromDiagnostic = (
     return "URL ends in .ts but the server returned an HLS manifest. Re-import with Live output: HLS (.m3u8).";
   }
   if (diagnostic.probeFetch === "failed") {
-    if (diagnostic.proxied) {
-      return `Stream proxy could not reach the provider (${String(diagnostic.fetchError ?? "network error")}).`;
-    }
-    return `Browser could not fetch the stream URL (${String(diagnostic.fetchError ?? "network/CORS")}).`;
+    return `Browser could not fetch the stream directly from the provider (${String(diagnostic.fetchError ?? "network/CORS")}). The provider must allow HTTPS and send CORS headers for in-browser playback.`;
   }
   if (playbackMode === "hls" && payloadKind !== "hls-manifest" && payloadKind !== "unknown") {
     return `Cannot play as HLS: ${String(diagnostic.payloadMeaning ?? payloadKind)}`;
@@ -195,63 +208,57 @@ const userMessageFromDiagnostic = (
 const resolveLiveFailureMessage = (
   reason: string,
   diagnostic: Record<string, unknown>,
-  restreamProbe: Record<string, unknown> | undefined,
   options: {
     attemptLabel?: string;
-    triedRestream: boolean;
     vlcFallbackUrl: string | null;
     userMessage?: string;
   },
 ): string => {
   if (options.userMessage) return options.userMessage;
 
-  if (options.triedRestream) {
-    const restreamText = String(restreamProbe?.bodyPreviewText ?? "");
-    if (restreamProbe?.probeFetch === "failed") {
-      return `Live restream could not be reached (${String(restreamProbe.fetchError ?? reason)}). Restart the dev server and try again.`;
-    }
-    if (restreamText && !restreamText.includes("#EXTM3U") && restreamProbe?.httpStatus !== 200) {
-      return `Live restream failed (${reason}).`;
-    }
-    return `Live restream interrupted (${reason}). Try playing the channel again.${
-      options.vlcFallbackUrl ? ` Or open in VLC: ${options.vlcFallbackUrl}` : ""
-    }`;
-  }
-
-  if (options.attemptLabel === "direct-hls" || !options.triedRestream) {
-    const probeMessage = userMessageFromDiagnostic(diagnostic, "hls");
-    if (probeMessage) return probeMessage;
-  }
+  const probeMessage = userMessageFromDiagnostic(diagnostic, "hls");
+  if (probeMessage) return probeMessage;
 
   return options.vlcFallbackUrl
     ? `Playback failed (${reason}). This stream may work in VLC: ${options.vlcFallbackUrl}`
     : `Playback failed (${reason}).`;
 };
 
-/** Fetch first bytes of the stream URL and return a paste-friendly diagnostic object. */
-const diagnoseStreamUrl = async (streamUrl: string): Promise<Record<string, unknown>> => {
-  const playbackUrl = resolveStreamPlaybackUrl(streamUrl);
-  const urlExtension = streamUrl.match(/\.([a-z0-9]+)(?:\?|$)/i)?.[1]?.toLowerCase() ?? "none";
-  const crossOrigin = isCrossOriginStream(streamUrl);
-  const proxied = playbackUrl !== streamUrl;
+/** Fetch first bytes of the resolved playback URL and return a paste-friendly diagnostic object. */
+const diagnoseStreamUrl = async (url: string): Promise<Record<string, unknown>> => {
+  const urlExtension = url.match(/\.([a-z0-9]+)(?:\?|$)/i)?.[1]?.toLowerCase() ?? "none";
+  const crossOrigin = isCrossOriginStream(url);
   const base: Record<string, unknown> = {
-    streamUrl,
-    playbackUrl,
-    proxied,
+    streamUrl: url,
+    playbackUrl: url,
+    scheme: /^https:/i.test(url) ? "https" : /^http:/i.test(url) ? "http" : "other",
     urlExtension,
     crossOrigin,
     pageOrigin: window.location.origin,
   };
 
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 6000);
   try {
-    const response = await fetch(playbackUrl, {
+    const response = await fetch(url, {
       method: "GET",
       headers: { Range: "bytes=0-2047", Accept: "*/*" },
       cache: "no-store",
+      signal: controller.signal,
     });
     const contentType = response.headers.get("content-type") ?? "";
-    const buffer = await response.arrayBuffer();
-    const bytes = new Uint8Array(buffer);
+    // Read only the first chunk — a live stream that ignores Range never ends,
+    // so we must not await the whole body.
+    const reader = response.body?.getReader();
+    let bytes = new Uint8Array(0);
+    if (reader) {
+      const { value } = await reader.read();
+      bytes = value ?? new Uint8Array(0);
+      void reader.cancel().catch(() => undefined);
+    } else {
+      bytes = new Uint8Array(await response.arrayBuffer());
+    }
+    clearTimeout(timer);
     const payloadKind = classifyStreamPayload(contentType.toLowerCase(), bytes);
     const preview = formatBodyPreview(bytes);
     return {
@@ -272,6 +279,7 @@ const diagnoseStreamUrl = async (streamUrl: string): Promise<Record<string, unkn
             : "n/a",
     };
   } catch (error) {
+    clearTimeout(timer);
     return {
       ...base,
       probeFetch: "failed",
@@ -572,6 +580,7 @@ export const VideoPlayer = ({
       hasAppliedResumeRef.current = true;
     };
     const onLoadedData = () => {
+      markPlaybackStarted();
       clearStartupTimer();
       setLoading(false);
     };
@@ -586,6 +595,7 @@ export const VideoPlayer = ({
     };
     const onWaiting = () => setLoading(true);
     const onPlaying = () => {
+      markPlaybackStarted();
       clearStartupTimer();
       setLoading(false);
     };
@@ -603,10 +613,36 @@ export const VideoPlayer = ({
     };
 
     const streamUrl = item.streamUrl;
-    const playbackUrl = resolveStreamPlaybackUrl(streamUrl);
     const playbackMode = resolvePlaybackMode(streamUrl, item.section);
-    const liveAttempts = item.section === "live" ? buildLivePlaybackAttempts(streamUrl) : [];
-    const vlcFallbackUrl = item.section === "live" ? toXtreamTsUrl(streamUrl) : null;
+
+    // Per-category http/https decision. The user's scheme is kept; for an HTTP
+    // host the first watch of a category tries HTTPS, falls back to HTTP, and
+    // caches whichever actually plays (see httpsCapability.ts). Assigned in the
+    // IIFE below; closures read them at playback time.
+    let playbackBaseUrl = streamUrl;
+    let playbackUrl = streamUrl;
+    let vlcFallbackUrl: string | null = null;
+    let liveAttempts: ReturnType<typeof buildLivePlaybackAttempts> = [];
+    let liveAttemptIndex = 0;
+    let activeLiveAttempts: ReturnType<typeof buildLivePlaybackAttempts> = [];
+
+    const category = categoryForSection(item.section);
+    let testingHttps = false;
+    let httpFallbackUrl: string | null = null;
+    let currentSchemeHttps = /^https:/i.test(streamUrl);
+    let playbackStarted = false;
+
+    // Called once real playback begins; commits to the current scheme and, if we
+    // were testing HTTPS for this category, records that HTTPS works.
+    const markPlaybackStarted = () => {
+      if (playbackStarted) return;
+      playbackStarted = true;
+      httpFallbackUrl = null;
+      if (testingHttps && currentSchemeHttps) {
+        writeHttpsCapability(streamUrl, category, "yes");
+        console.info("[IPTV][Player] HTTPS works for this category — cached 'yes'", { category });
+      }
+    };
 
     const playbackContext: Record<string, unknown> = {
       itemId: item.id,
@@ -619,17 +655,7 @@ export const VideoPlayer = ({
       hlsSupported: Hls.isSupported(),
       mpegtsSupported: canUseMpegTsEngine(),
       crossOrigin: isCrossOriginStream(streamUrl),
-      proxied: playbackUrl !== streamUrl,
-      vlcFallbackUrl,
-      playbackPlan: liveAttempts.map((attempt) => `${attempt.label}:${attempt.url}`),
     };
-
-    let liveAttemptIndex = 0;
-    let activeLiveAttempts = liveAttempts.map((attempt) => ({
-      ...attempt,
-      url: attempt.url.startsWith("/api/") ? attempt.url : resolveStreamPlaybackUrl(attempt.url),
-    }));
-    let liveRestreamRetries = 0;
 
     const failPlayback = (
       reason: string,
@@ -637,23 +663,34 @@ export const VideoPlayer = ({
       existingDiagnostic?: Record<string, unknown>,
     ) => {
       clearStartupTimer();
-      void (async () => {
-        const diagnostic = existingDiagnostic ?? (await diagnoseStreamUrl(streamUrl));
-        const attemptLabel = typeof extra?.attemptLabel === "string" ? extra.attemptLabel : undefined;
-        const playbackUrl = typeof extra?.playbackUrl === "string" ? extra.playbackUrl : undefined;
-        const attemptsTried = activeLiveAttempts.slice(0, liveAttemptIndex + 1).map((a) => a.label);
-        const triedRestream = attemptsTried.includes("restream-hls");
-        let restreamProbe: Record<string, unknown> | undefined;
-        if (triedRestream) {
-          const restreamUrl =
-            playbackUrl ??
-            activeLiveAttempts.find((attempt) => attempt.label === "restream-hls")?.url ??
-            "";
-          if (restreamUrl) restreamProbe = await diagnoseStreamUrl(restreamUrl);
+      // First-watch HTTPS test failed before anything played: remember this
+      // category is HTTP-only and retry the whole thing over HTTP.
+      if (httpFallbackUrl && !playbackStarted) {
+        const fallback = httpFallbackUrl;
+        httpFallbackUrl = null;
+        if (testingHttps) {
+          writeHttpsCapability(streamUrl, category, "no");
+          console.warn("[IPTV][Player] HTTPS failed for this category — cached 'no', falling back to HTTP", {
+            category,
+            reason,
+          });
         }
-        const userMessage = resolveLiveFailureMessage(reason, diagnostic, restreamProbe, {
+        playbackBaseUrl = fallback;
+        playbackUrl = fallback;
+        currentSchemeHttps = false;
+        void beginPlayback();
+        return;
+      }
+      void (async () => {
+        // Only diagnose now that playback has actually failed (the provider
+        // connection is free again). Prefer the URL of the attempt that failed.
+        const hasDiagnostic = existingDiagnostic && Object.keys(existingDiagnostic).length > 0;
+        const diagTarget = typeof extra?.playbackUrl === "string" ? extra.playbackUrl : playbackUrl;
+        const diagnostic = hasDiagnostic ? existingDiagnostic : await diagnoseStreamUrl(diagTarget);
+        const attemptLabel = typeof extra?.attemptLabel === "string" ? extra.attemptLabel : undefined;
+        const attemptsTried = activeLiveAttempts.slice(0, liveAttemptIndex + 1).map((a) => a.label);
+        const userMessage = resolveLiveFailureMessage(reason, diagnostic, {
           attemptLabel,
-          triedRestream,
           vlcFallbackUrl,
           userMessage: typeof extra?.userMessage === "string" ? extra.userMessage : undefined,
         });
@@ -664,7 +701,6 @@ export const VideoPlayer = ({
             vlcFallbackUrl,
             attemptsTried,
             ...extra,
-            restreamProbe,
           },
           diagnostic,
         );
@@ -681,21 +717,27 @@ export const VideoPlayer = ({
       });
     };
 
-    const armStartupTimeout = (attemptLabel?: string) => {
+    const armStartupTimeout = (label?: string) => {
       const timeoutMs =
-        attemptLabel === "restream-hls" ? MPEGTS_STARTUP_TIMEOUT_MS : SOURCE_STARTUP_TIMEOUT_MS;
+        label === "restream-hls"
+          ? RESTREAM_STARTUP_TIMEOUT_MS
+          : label === "direct-ts"
+            ? MPEGTS_STARTUP_TIMEOUT_MS
+            : SOURCE_STARTUP_TIMEOUT_MS;
       clearStartupTimer();
       startupTimerRef.current = window.setTimeout(() => {
         if (item.section === "live" && liveAttemptIndex + 1 < activeLiveAttempts.length) {
           tryLiveHlsNext("startup-timeout");
           return;
         }
+        const cur = activeLiveAttempts[liveAttemptIndex];
         failPlayback("startup-timeout", {
           timeoutMs,
           readyState: video.readyState,
           networkState: video.networkState,
-          attemptLabel: activeLiveAttempts[liveAttemptIndex]?.label,
-          playbackUrl: activeLiveAttempts[liveAttemptIndex]?.url,
+          attemptLabel: cur?.label,
+          // mpegts attempts go through the relay; HLS/restream URLs are same-origin already.
+          playbackUrl: cur ? (cur.engine === "mpegts" ? toRelayUrl(cur.url) : cur.url) : playbackUrl,
         });
       }, timeoutMs);
     };
@@ -717,16 +759,13 @@ export const VideoPlayer = ({
 
     let latestDiagnostic: Record<string, unknown> = {};
 
-    const startLiveHls = (attemptIndex: number) => {
+    const startLiveAttempt = (attemptIndex: number) => {
       const attempt = activeLiveAttempts[attemptIndex];
       if (!attempt) {
         failPlayback("no-live-attempts");
         return;
       }
       liveAttemptIndex = attemptIndex;
-      if (attempt.label !== "restream-hls") {
-        liveRestreamRetries = 0;
-      }
       prepareVideo();
       if (autoplay) armStartupTimeout(attempt.label);
 
@@ -734,10 +773,79 @@ export const VideoPlayer = ({
         ...playbackContext,
         attempt: attemptIndex,
         attemptLabel: attempt.label,
-        playbackUrl: attempt.url,
+        engine: attempt.engine,
+        playbackUrl: toRelayUrl(attempt.url),
       });
 
-      const hls = createLiveHls(attempt.label === "restream-hls");
+      const failOrNext = (reason: string, extra: Record<string, unknown>) => {
+        if (liveAttemptIndex + 1 < activeLiveAttempts.length) {
+          tryLiveHlsNext(reason, extra);
+          return;
+        }
+        // Diagnose the same-origin relay URL (not the direct provider URL) so we
+        // can see what the relay actually returns: TS bytes, an HTML SPA page
+        // (relay middleware not running — restart the dev server), or a 502.
+        failPlayback(
+          reason,
+          { ...extra, attemptLabel: attempt.label, playbackUrl: toRelayUrl(attempt.url) },
+          latestDiagnostic,
+        );
+      };
+
+      if (attempt.engine === "mpegts") {
+        if (!canUseMpegTsEngine()) {
+          failOrNext("mpegts-unsupported", { attemptLabel: attempt.label });
+          return;
+        }
+        const player = createLiveMpegTs(toRelayUrl(attempt.url));
+        mpegtsRef.current = player;
+        player.attachMediaElement(video);
+        player.load();
+        // Report the stream's actual codecs and whether this browser's Media
+        // Source can decode them — tells us if a stall is a decode problem.
+        player.on(mpegts.Events.MEDIA_INFO, (mediaInfo: unknown) => {
+          const info = (mediaInfo ?? {}) as {
+            mimeType?: string;
+            videoCodec?: string;
+            audioCodec?: string;
+            width?: number;
+            height?: number;
+          };
+          const mse = typeof MediaSource !== "undefined" ? MediaSource : undefined;
+          const supported = info.mimeType ? Boolean(mse?.isTypeSupported(info.mimeType)) : "unknown";
+          console.info("[IPTV][Player] mpegts MEDIA_INFO (codec check)", {
+            attemptLabel: attempt.label,
+            playbackUrl: attempt.url,
+            mimeType: info.mimeType,
+            videoCodec: info.videoCodec,
+            audioCodec: info.audioCodec,
+            resolution: info.width && info.height ? `${info.width}x${info.height}` : undefined,
+            mseCanDecode: supported,
+          });
+          if (supported === false) {
+            failOrNext("mpegts-codec-unsupported", {
+              attemptLabel: attempt.label,
+              mimeType: info.mimeType,
+              videoCodec: info.videoCodec,
+              audioCodec: info.audioCodec,
+              userMessage: `This channel uses a codec your browser cannot decode (video: ${info.videoCodec ?? "?"}, audio: ${info.audioCodec ?? "?"}). Browser playback needs H.264 video + AAC audio.`,
+            });
+          }
+        });
+        // NOTE: do not clear the startup timeout merely because bytes are
+        // downloading. A provider "debug"/HTML page also downloads (speed > 0)
+        // but never decodes — clearing here would make playback spin forever.
+        // The timer is cleared by the real `loadeddata`/`playing` events.
+        player.on(mpegts.Events.ERROR, (errorType: unknown, errorDetails: unknown, errorInfo: unknown) => {
+          failOrNext("mpegts-error", { errorType, errorDetails, errorInfo });
+        });
+        switchingSourceRef.current = false;
+        playCurrent();
+        if (!autoplay) setLoading(false);
+        return;
+      }
+
+      const hls = createLiveHls();
       hlsRef.current = hls;
       hls.loadSource(attempt.url);
       hls.attachMedia(video);
@@ -759,37 +867,12 @@ export const VideoPlayer = ({
           });
           return;
         }
-        if (liveAttemptIndex + 1 < activeLiveAttempts.length) {
-          tryLiveHlsNext("hls-fatal", {
-            hlsErrorType: data.type,
-            hlsErrorDetails: data.details,
-            hlsErrorResponseCode: data.response?.code,
-            hlsErrorResponseText: data.response?.text?.slice(0, 300),
-          });
-          return;
-        }
-        if (attempt.label === "restream-hls" && liveRestreamRetries < 1) {
-          liveRestreamRetries += 1;
-          console.warn("[IPTV][Player] Restream HLS error, restarting restream once", {
-            ...playbackContext,
-            attemptLabel: attempt.label,
-            hlsErrorDetails: data.details,
-          });
-          window.setTimeout(() => startLiveHls(attemptIndex), 600);
-          return;
-        }
-        failPlayback(
-          "hls-fatal",
-          {
-            hlsErrorType: data.type,
-            hlsErrorDetails: data.details,
-            hlsErrorResponseCode: data.response?.code,
-            hlsErrorResponseText: data.response?.text?.slice(0, 300),
-            attemptLabel: attempt.label,
-            playbackUrl: attempt.url,
-          },
-          latestDiagnostic,
-        );
+        failOrNext("hls-fatal", {
+          hlsErrorType: data.type,
+          hlsErrorDetails: data.details,
+          hlsErrorResponseCode: data.response?.code,
+          hlsErrorResponseText: data.response?.text?.slice(0, 300),
+        });
       });
       switchingSourceRef.current = false;
       playCurrent();
@@ -808,13 +891,46 @@ export const VideoPlayer = ({
         from: activeLiveAttempts[liveAttemptIndex],
         to: activeLiveAttempts[nextIndex],
       });
-      startLiveHls(nextIndex);
+      startLiveAttempt(nextIndex);
     };
 
-    void (async () => {
-      latestDiagnostic = await diagnoseStreamUrl(streamUrl);
+    const beginPlayback = async () => {
+      // (Re)build everything from the current base URL — this runs once for the
+      // primary scheme and again if we fall back from HTTPS to HTTP.
+      vlcFallbackUrl = item.section === "live" ? toXtreamTsUrl(playbackBaseUrl) : null;
+      liveAttempts = item.section === "live" ? buildLivePlaybackAttempts(playbackBaseUrl) : [];
+      activeLiveAttempts = liveAttempts.map((attempt) => ({ ...attempt }));
+      liveAttemptIndex = 0;
+      playbackUrl = playbackBaseUrl;
+      playbackContext.playbackUrl = playbackUrl;
+      playbackContext.scheme = currentSchemeHttps ? "https" : "http";
+      playbackContext.testingHttps = testingHttps;
+      playbackContext.category = category;
+      playbackContext.vlcFallbackUrl = vlcFallbackUrl;
+
       const playbackPlan =
         item.section === "live" ? activeLiveAttempts.map((a) => `${a.label}:${a.url}`) : [playbackUrl];
+
+      if (item.section === "live") {
+        // IMPORTANT: do NOT probe the provider before playing live. Many Xtream
+        // servers allow only one connection per stream, so an extra diagnostic
+        // fetch (even one we immediately abort) makes the provider reject
+        // mpegts.js's real connection. Play straight away; diagnostics only run
+        // afterwards if playback fails.
+        latestDiagnostic = {};
+        console.info("[IPTV][Player] Starting live playback (no pre-probe)", {
+          ...playbackContext,
+          playbackPlan,
+        });
+        console.info(
+          "[IPTV][Player] Paste this JSON:",
+          JSON.stringify({ ...playbackContext, playbackPlan }, null, 2),
+        );
+        startLiveAttempt(0);
+        return;
+      }
+
+      latestDiagnostic = await diagnoseStreamUrl(toRelayUrl(playbackBaseUrl));
       console.info("[IPTV][Player] Starting playback", {
         ...playbackContext,
         playbackPlan,
@@ -824,19 +940,6 @@ export const VideoPlayer = ({
         "[IPTV][Player] Paste this JSON:",
         JSON.stringify({ ...playbackContext, playbackPlan, streamProbe: latestDiagnostic }, null, 2),
       );
-
-      if (item.section === "live") {
-        if (latestDiagnostic.payloadKind === "html" || latestDiagnostic.urlExtensionMatchesPayload === false) {
-          activeLiveAttempts = liveAttempts.filter((attempt) => attempt.label !== "direct-hls");
-          if (activeLiveAttempts.length === 0) activeLiveAttempts = liveAttempts;
-        }
-        if (activeLiveAttempts.length === 0) {
-          failPlayback("no-live-attempts", undefined, latestDiagnostic);
-          return;
-        }
-        startLiveHls(0);
-        return;
-      }
 
       const probeBlockMessage = userMessageFromDiagnostic(latestDiagnostic, playbackMode);
       if (probeBlockMessage && latestDiagnostic.payloadKind !== "unknown") {
@@ -850,7 +953,7 @@ export const VideoPlayer = ({
       if (playbackMode === "hls") {
         const hls = new Hls();
         hlsRef.current = hls;
-        hls.loadSource(playbackUrl);
+        hls.loadSource(toRelayUrl(playbackUrl));
         hls.attachMedia(video);
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
           console.info("[IPTV][Player] HLS manifest parsed", playbackContext);
@@ -885,7 +988,7 @@ export const VideoPlayer = ({
         const player = mpegts.createPlayer(
           {
             type: "mpegts",
-            url: playbackUrl,
+            url: toRelayUrl(playbackUrl),
             isLive: false,
             cors: true,
             withCredentials: false,
@@ -930,10 +1033,23 @@ export const VideoPlayer = ({
         return;
       }
 
-      video.src = playbackUrl;
+      video.src = toRelayUrl(playbackUrl);
       switchingSourceRef.current = false;
       playCurrent();
       if (!autoplay) setLoading(false);
+    };
+
+    void (async () => {
+      // Play through the same-origin relay (/api/stream). The relay fetches the
+      // upstream with proper headers from the server, so the browser is not
+      // subject to CORS / the provider's browser gating. We keep the user's
+      // scheme as-is — the relay does the upstream fetch server-side.
+      playbackBaseUrl = streamUrl;
+      playbackUrl = streamUrl;
+      currentSchemeHttps = /^https:/i.test(streamUrl);
+      testingHttps = false;
+      httpFallbackUrl = null;
+      await beginPlayback();
     })();
 
     const onErrorEvent = () => {
@@ -1213,7 +1329,6 @@ export const VideoPlayer = ({
       setDownloadHint(result.message);
     }
   }, [item]);
-
   return (
     <div className={clsx("panel flex min-h-0 flex-col overflow-hidden", className)}>
       <div

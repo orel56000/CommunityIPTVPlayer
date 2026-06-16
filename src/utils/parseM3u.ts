@@ -1,7 +1,7 @@
 import { classifyPlaylistItem } from "./classifyPlaylistItem";
 import { computeShareIdFromUrl } from "./shareId";
 import type { ImportResult, PlaylistItem } from "../types/models";
-import { proxifyRemoteAssetUrl } from "./proxyUrl";
+import { cleanAssetUrl } from "./secureUrl";
 
 interface ExtInfData {
   duration: number | null;
@@ -142,7 +142,7 @@ export const parseM3u = (playlistId: string, text: string): ImportResult => {
       url: streamUrl,
       streamUrl,
       kind: classified.kind,
-      logo: proxifyRemoteAssetUrl(pending.attrs["tvg-logo"]),
+      logo: cleanAssetUrl(pending.attrs["tvg-logo"]),
       groupTitle,
       tvgName,
       tvgId,
@@ -258,7 +258,7 @@ const parseM3uInternal = async (
         url: streamUrl,
         streamUrl,
         kind: classified.kind,
-        logo: proxifyRemoteAssetUrl(pending.attrs["tvg-logo"]),
+        logo: cleanAssetUrl(pending.attrs["tvg-logo"]),
         groupTitle,
         tvgName,
         tvgId,

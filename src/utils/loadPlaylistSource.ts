@@ -1,6 +1,5 @@
 import type { ImportResult, PlaylistSource } from "../types/models";
 import { parseM3u, parseM3uChunked } from "./parseM3u";
-import { toProxyUrl } from "./proxyUrl";
 import { importXtreamPlaylist, xtreamSourceFromUrl } from "./xtream";
 
 interface LoadPlaylistSourceOptions {
@@ -15,7 +14,7 @@ export interface LoadPlaylistSourceResult extends ImportResult {
 }
 
 const fetchPlaylistText = async (url: string): Promise<string> => {
-  const response = await fetch(toProxyUrl(url), {
+  const response = await fetch(url, {
     headers: { accept: "application/x-mpegURL, application/vnd.apple.mpegurl, text/plain;q=0.9, */*;q=0.8" },
   });
   if (!response.ok) {

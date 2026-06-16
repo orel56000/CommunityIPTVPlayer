@@ -1,5 +1,10 @@
 import { applyIptvStreamHeaders, parseProxyTarget } from "./proxyShared.js";
 
+// Same-origin relay: the browser requests /api/stream?url=<upstream>, this
+// function fetches the upstream stream server-side (player User-Agent, follows
+// redirects) and pipes the bytes back. That removes the browser's CORS / mixed
+// content limits. NOTE: on a cloud host the upstream sees THIS server's IP, so
+// providers that lock to a residential IP will reject it (works from localhost).
 export const config = {
   runtime: "nodejs",
   maxDuration: 60,
@@ -24,12 +29,21 @@ export default async function handler(request: Request): Promise<Response> {
   upstreamRequestHeaders.set("referer", `${target.protocol}//${target.host}/`);
   applyIptvStreamHeaders(upstreamRequestHeaders, target);
 
-  const upstream = await fetch(target.toString(), {
-    method: "GET",
-    headers: upstreamRequestHeaders,
-    redirect: "follow",
-    cache: "no-store",
-  });
+  let upstream: Response;
+  try {
+    upstream = await fetch(target.toString(), {
+      method: "GET",
+      headers: upstreamRequestHeaders,
+      redirect: "follow",
+      cache: "no-store",
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Upstream fetch failed";
+    return new Response(`Relay could not reach the provider: ${message}`, {
+      status: 502,
+      headers: { "Access-Control-Allow-Origin": "*" },
+    });
+  }
 
   const responseHeaders = new Headers();
   copyHeader(upstream.headers, responseHeaders, "content-type");
@@ -37,10 +51,8 @@ export default async function handler(request: Request): Promise<Response> {
   copyHeader(upstream.headers, responseHeaders, "accept-ranges");
   copyHeader(upstream.headers, responseHeaders, "content-range");
   copyHeader(upstream.headers, responseHeaders, "cache-control");
-  copyHeader(upstream.headers, responseHeaders, "expires");
-  copyHeader(upstream.headers, responseHeaders, "etag");
-  copyHeader(upstream.headers, responseHeaders, "last-modified");
   responseHeaders.set("Access-Control-Allow-Origin", "*");
+  responseHeaders.set("Cross-Origin-Resource-Policy", "cross-origin");
 
   return new Response(upstream.body, {
     status: upstream.status,

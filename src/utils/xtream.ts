@@ -1,5 +1,5 @@
 import type { ImportResult, PlaylistItem, XtreamSourceConfig } from "../types/models";
-import { proxifyRemoteAssetUrl, toProxyUrl } from "./proxyUrl";
+import { cleanAssetUrl } from "./secureUrl";
 import { computeShareIdFromUrl } from "./shareId";
 
 interface XtreamCategory {
@@ -113,7 +113,7 @@ const toStringRecord = (input: Record<string, unknown>, omit: string[] = []): Re
 };
 
 const fetchJson = async <T>(url: string): Promise<T> => {
-  const response = await fetch(toProxyUrl(url), {
+  const response = await fetch(url, {
     headers: { accept: "application/json, text/plain;q=0.9, */*;q=0.8" },
   });
   if (!response.ok) {
@@ -173,9 +173,9 @@ const categoryMap = (categories: XtreamCategory[]): Map<string, string> =>
 
 const pickBackdrop = (value: unknown): string | undefined => {
   if (Array.isArray(value)) {
-    return proxifyRemoteAssetUrl(value.map((entry) => nonEmpty(entry)).find(Boolean) ?? undefined);
+    return cleanAssetUrl(value.map((entry) => nonEmpty(entry)).find(Boolean) ?? undefined);
   }
-  return proxifyRemoteAssetUrl(nonEmpty(value));
+  return cleanAssetUrl(nonEmpty(value));
 };
 
 const parseDuration = (value: unknown): number | null => {
@@ -224,7 +224,7 @@ const buildSeriesCatalogEntry = (
     id: seriesId,
     title,
     groupTitle: categoryName,
-    logo: proxifyRemoteAssetUrl(nonEmpty(series.cover)),
+    logo: cleanAssetUrl(nonEmpty(series.cover)),
     backdrop: undefined,
     description: nonEmpty(series.plot),
     rating: nonEmpty(series.rating),
@@ -248,7 +248,7 @@ const mapSeriesEpisodes = (
   const seriesDescription = nonEmpty(info.plot) ?? catalog.description;
   const rating = nonEmpty(info.rating) ?? catalog.rating;
   const releaseDate = nonEmpty(info.releaseDate) ?? catalog.releaseDate;
-  const seriesLogo = proxifyRemoteAssetUrl(nonEmpty(info.cover)) ?? catalog.logo;
+  const seriesLogo = cleanAssetUrl(nonEmpty(info.cover)) ?? catalog.logo;
 
   return episodes
     .map(({ season, episode }, episodeIndex) => {
@@ -269,7 +269,7 @@ const mapSeriesEpisodes = (
         playlistId,
         title,
         displayName: title,
-        logo: proxifyRemoteAssetUrl(nonEmpty(episodeInfo.movie_image)) ?? seriesLogo,
+        logo: cleanAssetUrl(nonEmpty(episodeInfo.movie_image)) ?? seriesLogo,
         backdrop: pickBackdrop(episodeInfo.backdrop_path) ?? seriesBackdrop,
         description: nonEmpty(episodeInfo.plot) ?? seriesDescription,
         rating,
@@ -374,7 +374,7 @@ export const importXtreamPlaylist = async (
     if (!streamId || !title) continue;
     const groupTitle = liveCategoryById.get(toText(stream.category_id)) ?? "Ungrouped";
     const archiveDays = nonEmpty(stream.tv_archive_duration);
-    const logo = proxifyRemoteAssetUrl(nonEmpty(stream.stream_icon));
+    const logo = cleanAssetUrl(nonEmpty(stream.stream_icon));
     const streamUrl = buildLiveStreamUrl(resolvedConfig, streamId);
     const metadata = toStringRecord(stream, ["name", "stream_icon", "category_id"]);
     const baseItem: PlaylistItem = {
@@ -422,7 +422,7 @@ export const importXtreamPlaylist = async (
       playlistId,
       title,
       displayName: title,
-      logo: proxifyRemoteAssetUrl(nonEmpty(stream.stream_icon)),
+      logo: cleanAssetUrl(nonEmpty(stream.stream_icon)),
       groupTitle: vodCategoryById.get(toText(stream.category_id)) ?? "Ungrouped",
       url: streamUrl,
       streamUrl,

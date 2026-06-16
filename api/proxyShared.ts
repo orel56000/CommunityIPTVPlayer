@@ -1,5 +1,7 @@
-export const IPTV_STREAM_USER_AGENT = "Mozilla/5.0 (Linux; Android 11) AppleWebKit/537.36 ExoPlayerLib/2.18.1";
+export const IPTV_STREAM_USER_AGENT =
+  "Mozilla/5.0 (Linux; Android 11) AppleWebKit/537.36 ExoPlayerLib/2.18.1";
 
+/** Headers that make IPTV providers serve the real stream (not a browser/debug page). */
 export const applyIptvStreamHeaders = (headers: Headers, target: URL): void => {
   headers.set("user-agent", IPTV_STREAM_USER_AGENT);
   headers.set("accept", "*/*");

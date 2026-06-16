@@ -22,20 +22,29 @@ export const buildXtreamLiveTsUrl = (
   return `${base}/live/${encodeURIComponent(username)}/${encodeURIComponent(password)}/${encodeURIComponent(streamId)}.ts`;
 };
 
-/** Backend ffmpeg restream — serves browser-playable HLS from an Xtream `.ts` source. */
+/** Server-side ffmpeg restream: serves browser-playable HLS remuxed from an Xtream `.ts` source. */
 export const buildRestreamManifestUrl = (tsUrl: string): string =>
   `/api/restream/index.m3u8?url=${encodeURIComponent(tsUrl)}`;
 
 export type LivePlaybackAttempt = {
   url: string;
-  label: "direct-hls" | "restream-hls";
+  label: "direct-ts" | "restream-hls";
+  engine: "mpegts" | "hls";
 };
 
+/**
+ * Live playback attempts, in priority order:
+ *   1. restream-hls - ffmpeg pulls the .ts (player headers) and remuxes to HLS,
+ *      played by hls.js. This is the reliable path for providers that gate or
+ *      send non-browser-decodable codecs (it normalizes to H.264/AAC).
+ *   2. direct-ts - the raw .ts via the byte relay + mpegts.js (lighter, works
+ *      only when the stream is already browser-decodable).
+ */
 export const buildLivePlaybackAttempts = (streamUrl: string): LivePlaybackAttempt[] => {
-  const attempts: LivePlaybackAttempt[] = [];
-  const m3u8Url = toXtreamM3u8Url(streamUrl);
   const tsUrl = toXtreamTsUrl(streamUrl);
-  if (m3u8Url) attempts.push({ url: m3u8Url, label: "direct-hls" });
-  if (tsUrl) attempts.push({ url: buildRestreamManifestUrl(tsUrl), label: "restream-hls" });
-  return attempts;
+  if (!tsUrl) return [];
+  return [
+    { url: buildRestreamManifestUrl(tsUrl), label: "restream-hls", engine: "hls" },
+    { url: tsUrl, label: "direct-ts", engine: "mpegts" },
+  ];
 };

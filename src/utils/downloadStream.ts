@@ -5,8 +5,6 @@
  * arbitrary `<video>` buffer (especially HLS); blob: `src` is the exception.
  */
 
-import { resolveStreamPlaybackUrl } from "./proxyUrl";
-
 const INVALID_FILE_CHARS = /[/\\?%*:|"<>]/g;
 
 export const sanitizeDownloadFilename = (title: string): string =>
@@ -67,7 +65,7 @@ export const downloadMediaFile = async (input: DownloadMediaInput): Promise<Down
   }
 
   try {
-    const response = await fetch(resolveStreamPlaybackUrl(streamUrl), {
+    const response = await fetch(streamUrl, {
       mode: "cors",
       credentials: "omit",
       cache: "default",
