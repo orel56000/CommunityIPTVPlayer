@@ -1,7 +1,8 @@
 import { applyIptvStreamHeaders, parseProxyTarget } from "./proxyShared.js";
 
 export const config = {
-  runtime: "edge",
+  runtime: "nodejs",
+  maxDuration: 60,
 };
 
 const copyHeader = (from: Headers, to: Headers, name: string): void => {
@@ -20,13 +21,7 @@ export default async function handler(request: Request): Promise<Response> {
   const upstreamRequestHeaders = new Headers();
   copyHeader(request.headers, upstreamRequestHeaders, "range");
   copyHeader(request.headers, upstreamRequestHeaders, "accept");
-  copyHeader(request.headers, upstreamRequestHeaders, "accept-encoding");
-  copyHeader(request.headers, upstreamRequestHeaders, "cache-control");
-  copyHeader(request.headers, upstreamRequestHeaders, "pragma");
-
-  if (!upstreamRequestHeaders.has("referer")) {
-    upstreamRequestHeaders.set("referer", `${target.protocol}//${target.host}/`);
-  }
+  upstreamRequestHeaders.set("referer", `${target.protocol}//${target.host}/`);
   applyIptvStreamHeaders(upstreamRequestHeaders, target);
 
   const upstream = await fetch(target.toString(), {
