@@ -149,11 +149,7 @@ async fn health() -> Response {
         r#"{{"app":"ctv-relay","version":"{}"}}"#,
         env!("CARGO_PKG_VERSION")
     );
-    (
-        [(header::CONTENT_TYPE, "application/json")],
-        body,
-    )
-        .into_response()
+    ([(header::CONTENT_TYPE, "application/json")], body).into_response()
 }
 
 #[derive(Serialize)]
@@ -332,7 +328,15 @@ async fn restream_segment(
         }
     };
     // Reject if ffmpeg already exited.
-    if session.child.lock().await.try_wait().ok().flatten().is_some() {
+    if session
+        .child
+        .lock()
+        .await
+        .try_wait()
+        .ok()
+        .flatten()
+        .is_some()
+    {
         return cors_text(
             StatusCode::NOT_FOUND,
             "Restream session not found or expired".to_string(),
@@ -615,8 +619,18 @@ async fn wait_for_manifest(manifest_path: &PathBuf, child: &mut Child, timeout: 
 }
 
 async fn is_healthy(session: &Arc<Session>) -> bool {
-    let exited = session.child.lock().await.try_wait().ok().flatten().is_some();
-    !exited && tokio::fs::try_exists(session.manifest_path()).await.unwrap_or(false)
+    let exited = session
+        .child
+        .lock()
+        .await
+        .try_wait()
+        .ok()
+        .flatten()
+        .is_some();
+    !exited
+        && tokio::fs::try_exists(session.manifest_path())
+            .await
+            .unwrap_or(false)
 }
 
 async fn invalidate(state: &RelayState, id: &str) {
@@ -631,7 +645,15 @@ async fn read_manifest(session: &Arc<Session>) -> Result<String, String> {
     let path = session.manifest_path();
     let deadline = tokio::time::Instant::now() + Duration::from_millis(5_000);
     loop {
-        if session.child.lock().await.try_wait().ok().flatten().is_some() {
+        if session
+            .child
+            .lock()
+            .await
+            .try_wait()
+            .ok()
+            .flatten()
+            .is_some()
+        {
             return Err("ffmpeg restream stopped unexpectedly".to_string());
         }
         if let Ok(content) = tokio::fs::read_to_string(&path).await {
@@ -656,7 +678,15 @@ async fn read_segment(session: &Arc<Session>, file_name: &str) -> Result<Vec<u8>
 
     let deadline = tokio::time::Instant::now() + Duration::from_millis(8_000);
     loop {
-        if session.child.lock().await.try_wait().ok().flatten().is_some() {
+        if session
+            .child
+            .lock()
+            .await
+            .try_wait()
+            .ok()
+            .flatten()
+            .is_some()
+        {
             return Err("ffmpeg restream stopped unexpectedly".to_string());
         }
         match tokio::fs::read(&segment_path).await {
