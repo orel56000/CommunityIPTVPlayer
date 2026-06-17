@@ -1,0 +1,32 @@
+[package]
+name = "community-iptv-player"
+version = "0.1.0"
+description = "Community IPTV Player desktop relay and app shell"
+authors = ["Community IPTV Player contributors"]
+license = "MIT"
+repository = "https://github.com/orel56000/CommunityIPTVPlayer"
+edition = "2021"
+rust-version = "1.77.2"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.4.1", features = [] }
+
+[dependencies]
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+log = "0.4"
+tauri = { version = "2.11.2", features = ["tray-icon"] }
+tauri-plugin-log = "2"
+
+# Local HTTP relay (axum + reqwest + tokio) — see src/relay.rs
+axum = "0.7"
+reqwest = { version = "0.12", features = ["stream"] }
+tokio = { version = "1", features = ["full"] }
+url = "2"
+tower-http = { version = "0.5", features = ["fs", "cors"] }

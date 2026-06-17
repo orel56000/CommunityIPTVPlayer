@@ -2,7 +2,15 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { Analytics } from "@vercel/analytics/react";
 import type { AppSettings, UIFilters } from "./types/player";
-import type { PlaylistItem, PlaylistSection, SavedPlaylist } from "./types/models";
+import type {
+  ContinueWatchingEntry,
+  FavoriteEntry,
+  PlaybackProgress,
+  PlaylistItem,
+  PlaylistSection,
+  RecentEntry,
+  SavedPlaylist,
+} from "./types/models";
 import { storage } from "./utils/storage";
 import { getShareId } from "./utils/shareId";
 import { buildEpisodeUrl, buildWatchPath, parseWatchPath, resolveWatchDeepLink } from "./utils/watchUrl";
@@ -15,6 +23,7 @@ import { useContinueWatching } from "./hooks/useContinueWatching";
 import { usePlaylistFilter } from "./hooks/usePlaylistFilter";
 import { usePlayer } from "./hooks/usePlayer";
 import { useDebouncedValue } from "./hooks/useDebouncedValue";
+import { useBackendConnection } from "./hooks/useBackendConnection";
 import { Header } from "./components/layout/Header";
 import { SearchOverlay, type SearchOpenFocus } from "./components/layout/SearchOverlay";
 import { PlaylistImportModal } from "./components/playlist/PlaylistImportModal";
@@ -23,6 +32,7 @@ import { PlaylistManager } from "./components/playlist/PlaylistManager";
 import { SettingsView } from "./components/views/SettingsView";
 import { ErrorState } from "./components/shared/ErrorState";
 import { InstallAppBanner } from "./components/shared/InstallAppBanner";
+import { BackendConnectionModal } from "./components/shared/BackendConnectionModal";
 import { DetailsPanel } from "./components/panels/DetailsPanel";
 import { PlayerNavBar } from "./components/player/PlayerNavBar";
 import { now } from "./utils/time";
@@ -56,18 +66,27 @@ const App = () => {
   const appliedDeepLinkKey = useRef<string | null>(null);
   const [deepLinkError, setDeepLinkError] = useState<string | null>(null);
   const [loadingSeriesId, setLoadingSeriesId] = useState<string | null>(null);
+  const [connectionOpen, setConnectionOpen] = useState(false);
+  const [connectionPlaybackError, setConnectionPlaybackError] = useState<string | null>(null);
+  const backendConnection = useBackendConnection();
+  const canPlayVideos = backendConnection.connected;
   const shouldRenderAnalytics =
     typeof window !== "undefined" && !["localhost", "127.0.0.1"].includes(window.location.hostname);
 
-  const setPlaylists = (playlists: SavedPlaylist[]) => setState((prev) => ({ ...prev, playlists }));
-  const setActivePlaylistId = (activePlaylistId: string | null) => setState((prev) => ({ ...prev, activePlaylistId }));
-  const setFavorites = (favorites: typeof state.favorites) => setState((prev) => ({ ...prev, favorites }));
-  const setRecents = (recents: typeof state.recents) => setState((prev) => ({ ...prev, recents }));
-  const setProgress = (progress: typeof state.progress) => setState((prev) => ({ ...prev, progress }));
-  const setContinueWatching = (continueWatching: typeof state.continueWatching) =>
-    setState((prev) => ({ ...prev, continueWatching }));
-  const setSettings = (settings: AppSettings) => setState((prev) => ({ ...prev, settings }));
-  const setSection = (section: PlaylistSection) => setState((prev) => ({ ...prev, section }));
+  const setPlaylists = useCallback((playlists: SavedPlaylist[]) => setState((prev) => ({ ...prev, playlists })), []);
+  const setActivePlaylistId = useCallback(
+    (activePlaylistId: string | null) => setState((prev) => ({ ...prev, activePlaylistId })),
+    [],
+  );
+  const setFavorites = useCallback((favorites: FavoriteEntry[]) => setState((prev) => ({ ...prev, favorites })), []);
+  const setRecents = useCallback((recents: RecentEntry[]) => setState((prev) => ({ ...prev, recents })), []);
+  const setProgress = useCallback((progress: PlaybackProgress[]) => setState((prev) => ({ ...prev, progress })), []);
+  const setContinueWatching = useCallback(
+    (continueWatching: ContinueWatchingEntry[]) => setState((prev) => ({ ...prev, continueWatching })),
+    [],
+  );
+  const setSettings = useCallback((settings: AppSettings) => setState((prev) => ({ ...prev, settings })), []);
+  const setSection = useCallback((section: PlaylistSection) => setState((prev) => ({ ...prev, section })), []);
   const toggleRightPanel = useCallback(() => {
     setState((prev) => ({
       ...prev,
@@ -150,6 +169,10 @@ const App = () => {
     else document.documentElement.classList.remove("light");
   }, [state.settings.theme]);
 
+  useEffect(() => {
+    if (canPlayVideos) setConnectionPlaybackError(null);
+  }, [canPlayVideos]);
+
   const activePlaylist = useActivePlaylist(state.playlists, state.activePlaylistId);
   const playlistItems = useMemo(() => activePlaylist?.items ?? [], [activePlaylist]);
   const groupedSeries = useMemo(() => groupSeries(playlistItems), [playlistItems]);
@@ -183,7 +206,7 @@ const App = () => {
   );
 
   const progressByItemId = useMemo(() => {
-    const map = new Map<string, typeof state.progress[number]>();
+    const map = new Map<string, PlaybackProgress>();
     for (const entry of state.progress) map.set(entry.itemId, entry);
     return map;
   }, [state.progress]);
@@ -218,6 +241,7 @@ const App = () => {
     const found = state.playlists.flatMap((p) => p.items).find((i) => i.id === state.lastPlayedId);
 
     if (found) {
+      if (!canPlayVideos) return;
       restoredLastVisitRef.current = true;
       setCurrentItem(found);
       if (found.playlistId !== state.activePlaylistId) setActivePlaylistId(found.playlistId);
@@ -235,6 +259,7 @@ const App = () => {
     state.lastPlayedId,
     state.lastPlayedWatch,
     state.activePlaylistId,
+    canPlayVideos,
     setCurrentItem,
     setSection,
     setActivePlaylistId,
@@ -446,6 +471,13 @@ const App = () => {
     setSearchFocus(null);
   }, []);
 
+  const showBackendRequired = useCallback(() => {
+    setConnectionPlaybackError(
+      "You are not connected to a Community IPTV Player backend, so playback was not started.",
+    );
+    setConnectionOpen(true);
+  }, []);
+
   useEffect(() => {
     if (!deepLink) return;
     const { playlistName, shareId } = deepLink;
@@ -485,6 +517,11 @@ const App = () => {
     }
 
     if (appliedDeepLinkKey.current === key) return;
+    if (!canPlayVideos) {
+      setDeepLinkError(null);
+      showBackendRequired();
+      return;
+    }
     appliedDeepLinkKey.current = key;
     setDeepLinkError(null);
 
@@ -496,6 +533,8 @@ const App = () => {
     deepLink,
     playerState.currentItem,
     pushRecentForItem,
+    canPlayVideos,
+    showBackendRequired,
     setActivePlaylistId,
     setCurrentItem,
     setSection,
@@ -555,9 +594,22 @@ const App = () => {
       openSearch({ category: "series", seriesId: item.id });
       return;
     }
+    if (!canPlayVideos) {
+      showBackendRequired();
+      return;
+    }
     setCurrentItem(item);
     pushRecentForItem(item);
-  }, [ensureSeriesLoaded, openSearch, pushRecentForItem, setActivePlaylistId, setCurrentItem, state.activePlaylistId]);
+  }, [
+    canPlayVideos,
+    ensureSeriesLoaded,
+    openSearch,
+    pushRecentForItem,
+    setActivePlaylistId,
+    setCurrentItem,
+    showBackendRequired,
+    state.activePlaylistId,
+  ]);
 
   const openSearchForNowPlaying = useCallback(() => {
     const item = playerState.currentItem;
@@ -870,8 +922,10 @@ const App = () => {
       <Header
         currentItem={playerState.currentItem}
         rightPanelOpen={state.settings.rightPanelOpen}
+        backendStatus={backendConnection.status}
         onOpenSearch={() => openSearch()}
         onOpenNowPlaying={openSearchForNowPlaying}
+        onOpenBackendConnection={() => setConnectionOpen(true)}
         onToggleRightPanel={toggleRightPanel}
       />
       <main className="mx-auto flex min-h-0 w-full max-w-[1920px] flex-1 flex-col overflow-hidden px-4 py-3 lg:px-8">
@@ -897,6 +951,8 @@ const App = () => {
               onProgress={onPlayerProgress}
               onEnded={onPlayerEnded}
               resumeFrom={currentResume}
+              playbackBlocked={!canPlayVideos}
+              onPlaybackBlockedAction={showBackendRequired}
             />
             {currentNextEpisode ? (
               <PlayerNavBar
@@ -914,6 +970,13 @@ const App = () => {
                   setDeepLinkError(null);
                   navigate("/", { replace: true });
                 }}
+              />
+            ) : null}
+            {connectionPlaybackError ? (
+              <ErrorState
+                message={connectionPlaybackError}
+                actionLabel="Open connection"
+                onRetry={() => setConnectionOpen(true)}
               />
             ) : null}
           </div>
@@ -973,6 +1036,11 @@ const App = () => {
         onSubmit={handleImport}
       />
       <InstallAppBanner />
+      <BackendConnectionModal
+        open={connectionOpen}
+        connection={backendConnection}
+        onClose={() => setConnectionOpen(false)}
+      />
       {shouldRenderAnalytics ? <Analytics /> : null}
     </div>
   );

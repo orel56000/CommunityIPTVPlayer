@@ -9,8 +9,19 @@ coverage
 vite.config.js
 vite.config.d.ts
 /.playwright-mcp
-<<<<<<< Updated upstream
+.vercel
+.turbo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 *.log
-=======
->>>>>>> Stashed changes
 *.bin
+
+# Rust / Tauri
+/src-tauri/target
+/src-tauri/gen/schemas
+# Bundled ffmpeg sidecar (large; staged locally for `tauri build`)
+/src-tauri/binaries
+
+# Local implementation notes, not required for production builds
+/docs/native-relay-*.md

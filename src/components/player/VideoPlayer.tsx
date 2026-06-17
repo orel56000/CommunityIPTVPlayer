@@ -23,6 +23,8 @@ interface VideoPlayerProps {
   onProgress: (positionSec: number, durationSec: number) => void;
   onEnded: () => void;
   resumeFrom: number;
+  playbackBlocked?: boolean;
+  onPlaybackBlockedAction?: () => void;
   className?: string;
 }
 
@@ -144,9 +146,12 @@ const classifyStreamPayload = (contentType: string, bytes: Uint8Array): StreamPa
 
 const formatBodyPreview = (bytes: Uint8Array): { text: string; hex: string } => {
   const slice = bytes.slice(0, 256);
-  const text = new TextDecoder(undefined, { fatal: false })
-    .decode(slice)
-    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, " ")
+  const decoded = new TextDecoder(undefined, { fatal: false }).decode(slice);
+  const text = Array.from(decoded, (char) => {
+    const code = char.charCodeAt(0);
+    return (code <= 8 || code === 11 || code === 12 || (code >= 14 && code <= 31)) ? " " : char;
+  })
+    .join("")
     .trim()
     .slice(0, 200);
   const hex = Array.from(slice.slice(0, 48))
@@ -318,6 +323,8 @@ export const VideoPlayer = ({
   onProgress,
   onEnded,
   resumeFrom,
+  playbackBlocked = false,
+  onPlaybackBlockedAction,
   className,
 }: VideoPlayerProps) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -558,6 +565,22 @@ export const VideoPlayer = ({
     const video = videoRef.current;
     if (!video || !item) return;
     hasAppliedResumeRef.current = false;
+    if (playbackBlocked) {
+      if (hlsRef.current) {
+        hlsRef.current.destroy();
+        hlsRef.current = null;
+      }
+      destroyMpegTsPlayer();
+      video.pause();
+      video.removeAttribute("src");
+      video.load();
+      const message = "You are not connected to a Community IPTV Player backend.";
+      setLoading(false);
+      setLocalError(message);
+      onErrorRef.current(message);
+      onPlayingStateRef.current(false);
+      return;
+    }
     setLoading(true);
     setLocalError(null);
     onErrorRef.current(null);
@@ -1122,7 +1145,7 @@ export const VideoPlayer = ({
         audioContextRef.current = null;
       }
     };
-  }, [item, autoplay, clearStartupTimer, destroyMpegTsPlayer]);
+  }, [item, autoplay, clearStartupTimer, destroyMpegTsPlayer, playbackBlocked]);
 
   useEffect(() => {
     const onFsChange = () => {
@@ -1136,6 +1159,10 @@ export const VideoPlayer = ({
 
   const togglePlay = useCallback(() => {
     if (!item) return;
+    if (playbackBlocked) {
+      onPlaybackBlockedAction?.();
+      return;
+    }
     if (isCasting) {
       castPlayPause();
       return;
@@ -1145,7 +1172,7 @@ export const VideoPlayer = ({
     if (!video) return;
     if (video.paused) void video.play().catch(() => undefined);
     else video.pause();
-  }, [item, isCasting, castPlayPause, resumeAudioContext]);
+  }, [item, playbackBlocked, onPlaybackBlockedAction, isCasting, castPlayPause, resumeAudioContext]);
 
   const seekTo = useCallback(
     (seconds: number) => {
@@ -1383,6 +1410,8 @@ export const VideoPlayer = ({
           downloadHint={downloadHint}
           isHlsStream={item ? isHlsUrl(item.streamUrl) : false}
           onDownload={() => void handleDownload()}
+          errorActionLabel={playbackBlocked ? "Connect backend" : undefined}
+          onErrorAction={playbackBlocked ? onPlaybackBlockedAction : undefined}
         />
       </div>
     </div>

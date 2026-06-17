@@ -31,17 +31,33 @@ export const isHttpUrl = (url: string): boolean => /^http:\/\//i.test((url ?? ""
 const RELAY_PATH = "/api/stream";
 
 /**
- * Route a remote stream URL through the same-origin relay (api/stream.ts), so
- * the browser fetches same-origin bytes instead of hitting the provider's CORS
- * / redirect / browser-gating directly. Pass-through for already-relayed or
- * same-origin (root-relative) paths.
+ * Base of the relay that serves /api/*. Empty string = same-origin (the bundled
+ * Tauri window, served by the local relay, OR the deployed site's own
+ * serverless relay). The discovery probe (relayDiscovery.ts) sets this to
+ * `http://127.0.0.1:11471` when the local helper app is detected, so the
+ * HTTPS site can route stream/restream calls to the home-IP relay.
+ */
+let RELAY_BASE = "";
+
+export const setRelayBase = (base: string): void => {
+  RELAY_BASE = (base ?? "").replace(/\/+$/, "");
+};
+
+export const getRelayBase = (): string => RELAY_BASE;
+
+/**
+ * Route a remote stream URL through the relay (api/stream.ts), so the browser
+ * fetches relayed bytes instead of hitting the provider's CORS / redirect /
+ * browser-gating directly. Prepends RELAY_BASE so it targets the local helper
+ * when discovered. Pass-through for already-relayed or root-relative paths.
  */
 export const toRelayUrl = (url: string): string => {
   const trimmed = (url ?? "").trim();
   if (!trimmed) return trimmed;
-  if (trimmed.startsWith(RELAY_PATH + "?") || trimmed.startsWith("/")) return trimmed;
+  if (trimmed.startsWith(RELAY_BASE + RELAY_PATH + "?")) return trimmed;
+  if (!RELAY_BASE && (trimmed.startsWith(RELAY_PATH + "?") || trimmed.startsWith("/"))) return trimmed;
   if (!isAbsoluteHttp(trimmed)) return trimmed;
-  return RELAY_PATH + "?url=" + encodeURIComponent(trimmed);
+  return RELAY_BASE + RELAY_PATH + "?url=" + encodeURIComponent(trimmed);
 };
 
 /**

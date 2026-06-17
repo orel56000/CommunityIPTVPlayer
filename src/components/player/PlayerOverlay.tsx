@@ -56,6 +56,8 @@ export interface PlayerOverlayProps {
   downloadHint: string | null;
   isHlsStream: boolean;
   onDownload: () => void;
+  errorActionLabel?: string;
+  onErrorAction?: () => void;
 }
 
 const RATES = [0.5, 0.75, 1, 1.25, 1.5, 2];
@@ -94,6 +96,8 @@ export const PlayerOverlay = ({
   downloadHint,
   isHlsStream,
   onDownload,
+  errorActionLabel,
+  onErrorAction,
 }: PlayerOverlayProps) => {
   const [ratesOpen, setRatesOpen] = useState(false);
   const scrubberRef = useRef<HTMLDivElement | null>(null);
@@ -203,9 +207,23 @@ export const PlayerOverlay = ({
           </div>
         ) : null}
         {error ? (
-          <div className="pointer-events-auto mb-4 inline-flex max-w-md items-center gap-2 rounded-md bg-rose-950/90 px-3 py-2 text-sm text-rose-100 shadow-lg">
-            <AlertTriangle size={16} /> {error}
-          </div>
+          onErrorAction ? (
+            <button
+              type="button"
+              className="pointer-events-auto mb-4 inline-flex max-w-md items-center gap-2 rounded-md bg-rose-950/90 px-3 py-2 text-left text-sm text-rose-100 shadow-lg transition hover:bg-rose-900/95"
+              onClick={onErrorAction}
+            >
+              <AlertTriangle size={16} className="shrink-0" />
+              <span className="min-w-0">
+                {error}
+                {errorActionLabel ? <span className="ml-1 font-semibold underline decoration-rose-200/50">{errorActionLabel}</span> : null}
+              </span>
+            </button>
+          ) : (
+            <div className="pointer-events-auto mb-4 inline-flex max-w-md items-center gap-2 rounded-md bg-rose-950/90 px-3 py-2 text-sm text-rose-100 shadow-lg">
+              <AlertTriangle size={16} /> {error}
+            </div>
+          )
         ) : null}
         {showCenterBigPlay ? (
           <button

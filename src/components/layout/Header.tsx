@@ -1,12 +1,15 @@
-import { ChevronRight, MonitorPlay, PanelRightClose, PanelRightOpen, Search } from "lucide-react";
+import { ChevronRight, MonitorPlay, PanelRightClose, PanelRightOpen, Search, Server } from "lucide-react";
 import type { PlaylistItem } from "../../types/models";
 import { GitHubIcon } from "../shared/GitHubIcon";
+import type { RelayStatus } from "../../utils/relayDiscovery";
 
 interface HeaderProps {
   currentItem: PlaylistItem | null;
   rightPanelOpen: boolean;
+  backendStatus: RelayStatus;
   onOpenSearch: () => void;
   onOpenNowPlaying: () => void;
+  onOpenBackendConnection: () => void;
   onToggleRightPanel: () => void;
 }
 
@@ -23,8 +26,10 @@ const SearchTrigger = ({ onOpenSearch }: { onOpenSearch: () => void }) => (
 export const Header = ({
   currentItem,
   rightPanelOpen,
+  backendStatus,
   onOpenSearch,
   onOpenNowPlaying,
+  onOpenBackendConnection,
   onToggleRightPanel,
 }: HeaderProps) => (
   <header className="sticky top-0 z-20 border-b border-white/[0.06] bg-slate-950/65 backdrop-blur-2xl supports-[backdrop-filter]:bg-slate-950/50">
@@ -79,6 +84,25 @@ export const Header = ({
       </div>
 
       <div className="relative z-10 ml-auto flex shrink-0 items-center gap-2">
+        <button
+          type="button"
+          className="btn relative border-white/10 bg-white/[0.04] px-2.5 py-2"
+          onClick={onOpenBackendConnection}
+          aria-label="Backend connection"
+          title="Backend connection"
+        >
+          <Server size={16} />
+          <span
+            className={
+              backendStatus === "available"
+                ? "absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full bg-emerald-400 ring-2 ring-slate-950"
+                : backendStatus === "checking" || backendStatus === "unknown"
+                  ? "absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full bg-amber-400 ring-2 ring-slate-950"
+                  : "absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full bg-rose-500 ring-2 ring-slate-950"
+            }
+            aria-hidden
+          />
+        </button>
         <button
           type="button"
           className="btn border-white/10 bg-white/[0.04] px-2.5 py-2"

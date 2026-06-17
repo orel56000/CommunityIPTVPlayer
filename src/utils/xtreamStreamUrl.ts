@@ -1,3 +1,5 @@
+import { getRelayBase } from "./secureUrl";
+
 /** Build Xtream live MPEG-TS URL from any live stream URL variant. */
 export const toXtreamTsUrl = (streamUrl: string): string | null => {
   if (/\.ts(\?|$)/i.test(streamUrl)) return streamUrl;
@@ -24,7 +26,7 @@ export const buildXtreamLiveTsUrl = (
 
 /** Server-side ffmpeg restream: serves browser-playable HLS remuxed from an Xtream `.ts` source. */
 export const buildRestreamManifestUrl = (tsUrl: string): string =>
-  `/api/restream/index.m3u8?url=${encodeURIComponent(tsUrl)}`;
+  `${getRelayBase()}/api/restream/index.m3u8?url=${encodeURIComponent(tsUrl)}`;
 
 export type LivePlaybackAttempt = {
   url: string;

@@ -111,6 +111,28 @@ npm run build
 npm run preview
 ```
 
+## Desktop App
+
+The Tauri desktop app includes a local IPTV relay so the web UI can connect to a native backend on this device or another device on the same network.
+
+```bash
+npm run tauri:sidecars
+npm run tauri:build
+```
+
+The ffmpeg sidecar is prepared from the `ffmpeg-static` npm package into `src-tauri/binaries/` before the Tauri build. That directory is intentionally ignored by Git because the binary is large and platform-specific.
+
+## Release
+
+GitHub Actions builds the Windows desktop app automatically.
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Pushing a `v*` tag creates a GitHub Release with the generated `.msi`, setup `.exe`, and standalone desktop `.exe`. The workflow can also be run manually from the Actions tab to produce downloadable build artifacts without publishing a release.
+
 ## Usage
 
 1. Start the app locally with `npm run dev`.
