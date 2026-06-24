@@ -497,6 +497,13 @@ export const VideoPlayer = ({
     [displayDuration],
   );
 
+  // Controls auto-hide only while genuinely playing; the scheduled hide reads
+  // this ref so a stale timer can't hide the bar while paused/loading/errored.
+  const canAutoHideRef = useRef(false);
+  useEffect(() => {
+    canAutoHideRef.current = displayPlaying && !displayLoading && !localError;
+  }, [displayPlaying, displayLoading, localError]);
+
   const showControls = useCallback(() => {
     setControlsVisible(true);
     if (hideTimerRef.current != null) {
@@ -538,6 +545,17 @@ export const VideoPlayer = ({
       window.clearTimeout(hideTimerRef.current);
     }
     hideTimerRef.current = window.setTimeout(() => {
+      // Only auto-hide during active playback (paused/loading/error keep the bar
+      // up). A focused control button must NOT keep the bar up — that's the
+      // "stuck bar after clicking play/fullscreen" case — but don't yank away a
+      // focused text field (e.g. the volume % input) mid-edit.
+      if (!canAutoHideRef.current) return;
+      const active = document.activeElement;
+      const editingField =
+        active instanceof HTMLInputElement &&
+        active.type !== "range" &&
+        Boolean(containerRef.current?.contains(active));
+      if (editingField) return;
       setControlsVisible(false);
     }, CONTROLS_HIDE_MS);
   }, []);
@@ -1360,12 +1378,19 @@ export const VideoPlayer = ({
     <div className={clsx("panel flex min-h-0 flex-col overflow-hidden", className)}>
       <div
         ref={containerRef}
-        className="player-viewport group/player relative"
+        className={clsx(
+          "player-viewport group/player relative",
+          // Hide the cursor with the controls during playback (e.g. fullscreen);
+          // any pointer move re-shows both via bumpControls.
+          !controlsVisible && "cursor-none",
+        )}
         onPointerMove={bumpControls}
         onPointerLeave={() => {
           if (displayPlaying && !displayLoading && !localError) setControlsVisible(false);
         }}
-        onFocus={showControls}
+        // Show on focus AND reschedule the hide, so a control keeping focus
+        // (after a click, or tabbing) doesn't leave the bar stuck visible.
+        onFocus={bumpControls}
         tabIndex={0}
       >
         <video

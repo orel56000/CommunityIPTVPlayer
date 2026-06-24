@@ -28,7 +28,7 @@ use std::hash::{Hash, Hasher};
 use std::net::UdpSocket;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::process::{Child, Command};
@@ -57,6 +57,10 @@ pub struct RelayState {
     /// Per-session-id async locks, to serialize "start ffmpeg" for one URL
     /// without blocking other sessions or segment reads.
     starting: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    /// NVENC (NVIDIA GPU H.264 encode) availability, probed once: 0=unknown,
+    /// 1=available, 2=unavailable. Lets heavy (4K/HEVC) transcodes run on the
+    /// GPU in real time instead of choking libx264 on the CPU.
+    nvenc: Arc<AtomicU8>,
 }
 
 impl RelayState {
@@ -70,6 +74,7 @@ impl RelayState {
             ffmpeg: Arc::new(ffmpeg),
             sessions: Arc::new(Mutex::new(HashMap::new())),
             starting: Arc::new(Mutex::new(HashMap::new())),
+            nvenc: Arc::new(AtomicU8::new(0)),
         }
     }
 }
@@ -372,7 +377,75 @@ fn output_dir_for(id: &str) -> PathBuf {
     std::env::temp_dir().join("iptv-restream").join(id)
 }
 
-fn build_ffmpeg_args(source_url: &str, output_dir: &PathBuf, transcode: bool) -> Vec<String> {
+/// What ffmpeg should do with each stream. Copying is cheap but only works when
+/// the codec is already browser-decodable (H.264 video / AAC|MP3 audio). HEVC,
+/// MPEG-2, AC-3, etc. must be transcoded to play in a WebView/MSE.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct EncodeMode {
+    video_copy: bool,
+    audio_copy: bool,
+}
+
+impl EncodeMode {
+    const COPY: Self = Self { video_copy: true, audio_copy: true };
+    const TRANSCODE: Self = Self { video_copy: false, audio_copy: false };
+}
+
+/// Outcome of starting ffmpeg: a healthy session, a request to restart with a
+/// corrected encode mode (the source codec wasn't browser-native), or a failure.
+enum StartError {
+    Restart(EncodeMode),
+    Failed(String),
+}
+
+fn start_error_message(err: StartError) -> String {
+    match err {
+        StartError::Failed(msg) => msg,
+        StartError::Restart(_) => "ffmpeg restart requested".to_string(),
+    }
+}
+
+#[derive(Clone, Default)]
+struct DetectedCodecs {
+    video: Option<String>,
+    audio: Option<String>,
+}
+
+/// Browsers (MSE) decode H.264 reliably; HEVC/H.265, MPEG-2, VP9, AV1 do not.
+fn video_browser_friendly(codec: &str) -> bool {
+    codec.eq_ignore_ascii_case("h264")
+}
+
+/// AAC and MP3 are broadly decodable in MSE; AC-3/E-AC-3/MP2/DTS are not.
+fn audio_browser_friendly(codec: &str) -> bool {
+    matches!(codec.to_ascii_lowercase().as_str(), "aac" | "mp3")
+}
+
+/// Pull the codec name from an ffmpeg input-dump line, e.g.
+/// `Stream #0:0: Video: hevc (Main 10) ...` -> (is_video=true, "hevc").
+fn parse_stream_codec(line: &str) -> Option<(bool, String)> {
+    for (is_video, marker) in [(true, "Video: "), (false, "Audio: ")] {
+        if let Some(i) = line.find(marker) {
+            let codec = line[i + marker.len()..]
+                .split([' ', ',', '('])
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if !codec.is_empty() {
+                return Some((is_video, codec));
+            }
+        }
+    }
+    None
+}
+
+fn build_ffmpeg_args(
+    source_url: &str,
+    output_dir: &PathBuf,
+    mode: EncodeMode,
+    use_nvenc: bool,
+) -> Vec<String> {
     let manifest = output_dir.join("index.m3u8");
     let segment_pattern = output_dir.join("seg_%03d.ts");
     let referer = match url::Url::parse(source_url) {
@@ -380,10 +453,12 @@ fn build_ffmpeg_args(source_url: &str, output_dir: &PathBuf, transcode: bool) ->
         Err(_) => String::new(),
     };
 
+    // `-loglevel info` so ffmpeg prints the input stream dump (the "Video: hevc"
+    // line) we parse to decide copy-vs-transcode — no separate probe connection.
     let mut args: Vec<String> = vec![
         "-hide_banner".into(),
         "-loglevel".into(),
-        "warning".into(),
+        "info".into(),
         "-user_agent".into(),
         PLAYER_UA.into(),
         "-headers".into(),
@@ -400,28 +475,71 @@ fn build_ffmpeg_args(source_url: &str, output_dir: &PathBuf, transcode: bool) ->
         source_url.into(),
     ];
 
-    if transcode {
+    // Common to both encoders: force an IDR keyframe every 2s (aligned with
+    // hls_time) so EVERY HLS segment starts on a keyframe. Without this the
+    // source GOP (often 5–10s) leaves most segments starting mid-GOP, which
+    // decodes as gray macroblock garbage until the next keyframe (the periodic
+    // glitch). Convert to 8-bit yuv420p so 10-bit HEVC (Main10) sources don't
+    // yield output the browser can't decode (and which H.264 NVENC can't make).
+    if mode.video_copy {
+        args.extend(["-c:v", "copy"].iter().map(|s| s.to_string()));
+    } else if use_nvenc {
+        // GPU (NVENC): cap at 1080p; ~2x real-time even for 4K/50fps HEVC, where
+        // libx264 falls behind (~0.7x) and the stream buffers.
         args.extend(
             [
+                "-vf",
+                "scale=min(1920\\,iw):-2,format=yuv420p",
+                "-c:v",
+                "h264_nvenc",
+                "-preset",
+                "p4",
+                "-tune",
+                "ll",
+                "-b:v",
+                "6M",
+                "-maxrate",
+                "8M",
+                "-bufsize",
+                "12M",
+                "-forced-idr",
+                "1",
+                "-force_key_frames",
+                "expr:gte(t,n_forced*2)",
+            ]
+            .iter()
+            .map(|s| s.to_string()),
+        );
+    } else {
+        // CPU (libx264): cap at 720p so software encode can keep up in real time.
+        args.extend(
+            [
+                "-vf",
+                "scale=min(1280\\,iw):-2,format=yuv420p",
                 "-c:v",
                 "libx264",
                 "-preset",
                 "veryfast",
                 "-tune",
                 "zerolatency",
-                "-c:a",
-                "aac",
-                "-b:a",
-                "128k",
-                "-ac",
-                "2",
+                "-force_key_frames",
+                "expr:gte(t,n_forced*2)",
+                "-sc_threshold",
+                "0",
             ]
             .iter()
             .map(|s| s.to_string()),
         );
+    }
+
+    if mode.audio_copy {
+        args.extend(["-c:a", "copy"].iter().map(|s| s.to_string()));
     } else {
-        args.push("-c".into());
-        args.push("copy".into());
+        args.extend(
+            ["-c:a", "aac", "-b:a", "128k", "-ac", "2"]
+                .iter()
+                .map(|s| s.to_string()),
+        );
     }
 
     args.extend(
@@ -443,6 +561,55 @@ fn build_ffmpeg_args(source_url: &str, output_dir: &PathBuf, transcode: bool) ->
     args.push(manifest.to_string_lossy().replace('\\', "/"));
 
     args
+}
+
+/// NVENC availability, probed once and cached. Lets heavy 4K/HEVC transcodes run
+/// on the GPU in real time (libx264 on CPU can't keep up with 4K/50fps).
+async fn nvenc_available(state: &RelayState) -> bool {
+    match state.nvenc.load(Ordering::Relaxed) {
+        1 => return true,
+        2 => return false,
+        _ => {}
+    }
+    let ok = probe_nvenc(state.ffmpeg.as_ref()).await;
+    state.nvenc.store(if ok { 1 } else { 2 }, Ordering::Relaxed);
+    if ok {
+        log::info!("[Restream] NVENC available — GPU transcode for heavy sources");
+    } else {
+        log::info!("[Restream] NVENC unavailable — using libx264 (CPU) transcode");
+    }
+    ok
+}
+
+/// Encode one tiny frame with h264_nvenc to confirm the GPU encoder initializes.
+async fn probe_nvenc(ffmpeg: &PathBuf) -> bool {
+    let mut cmd = Command::new(ffmpeg);
+    cmd.args([
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        "nullsrc=s=320x240",
+        "-frames:v",
+        "1",
+        "-c:v",
+        "h264_nvenc",
+        "-f",
+        "null",
+        "-",
+    ])
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(Stdio::null())
+    .kill_on_drop(true);
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    matches!(cmd.status().await, Ok(s) if s.success())
 }
 
 /// Get a healthy session for the source url, or start ffmpeg (copy, then
@@ -483,12 +650,23 @@ async fn get_or_start(
     // Drop any unhealthy session before starting fresh.
     invalidate(state, &id).await;
 
-    // Try stream copy first, then transcode (libx264/aac) on failure.
-    let session = match run_ffmpeg_session(state, source_url, &id, false).await {
+    // First attempt: copy (cheap) while detecting the source codecs from
+    // ffmpeg's input dump. If the source isn't browser-native (e.g. HEVC video),
+    // restart with the right transcode mode. If copy fails outright, fall back to
+    // a full transcode.
+    let session = match run_ffmpeg_session(state, source_url, &id, EncodeMode::COPY, true).await {
         Ok(s) => s,
-        Err(copy_err) => {
+        Err(StartError::Restart(mode)) => {
+            log::info!("[Restream] source not browser-native; re-encoding ({mode:?})");
+            run_ffmpeg_session(state, source_url, &id, mode, false)
+                .await
+                .map_err(start_error_message)?
+        }
+        Err(StartError::Failed(copy_err)) => {
             log::warn!("[Restream] stream copy failed, retrying with transcode: {copy_err}");
-            run_ffmpeg_session(state, source_url, &id, true).await?
+            run_ffmpeg_session(state, source_url, &id, EncodeMode::TRANSCODE, false)
+                .await
+                .map_err(start_error_message)?
         }
     };
     // The player shows one stream at a time, so a new live channel means the
@@ -514,15 +692,23 @@ async fn run_ffmpeg_session(
     state: &RelayState,
     source_url: &str,
     id: &str,
-    transcode: bool,
-) -> Result<Arc<Session>, String> {
+    mode: EncodeMode,
+    detect: bool,
+) -> Result<Arc<Session>, StartError> {
     let output_dir = output_dir_for(id);
     let _ = tokio::fs::remove_dir_all(&output_dir).await;
     tokio::fs::create_dir_all(&output_dir)
         .await
-        .map_err(|e| format!("could not create restream dir: {e}"))?;
+        .map_err(|e| StartError::Failed(format!("could not create restream dir: {e}")))?;
 
-    let args = build_ffmpeg_args(source_url, &output_dir, transcode);
+    // Use the GPU (NVENC) for video transcodes when available — essential for
+    // 4K/HEVC sources that overwhelm libx264 on the CPU.
+    let use_nvenc = if mode.video_copy {
+        false
+    } else {
+        nvenc_available(state).await
+    };
+    let args = build_ffmpeg_args(source_url, &output_dir, mode, use_nvenc);
     let mut cmd = Command::new(state.ffmpeg.as_ref());
     cmd.args(&args)
         .stdin(Stdio::null())
@@ -537,84 +723,138 @@ async fn run_ffmpeg_session(
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("could not start ffmpeg ({}): {e}", state.ffmpeg.display()))?;
+    let mut child = cmd.spawn().map_err(|e| {
+        StartError::Failed(format!("could not start ffmpeg ({}): {e}", state.ffmpeg.display()))
+    })?;
 
-    // Drain stderr so the pipe never blocks; keep the tail for error messages.
+    // Drain stderr: keep a tail for error messages AND parse the input dump to
+    // learn the source codecs (for the copy-vs-transcode decision).
     let stderr_tail = Arc::new(Mutex::new(String::new()));
+    let codecs = Arc::new(Mutex::new(DetectedCodecs::default()));
     if let Some(stderr) = child.stderr.take() {
         let tail = stderr_tail.clone();
+        let codecs = codecs.clone();
         tokio::spawn(async move {
-            use tokio::io::{AsyncReadExt, BufReader};
-            let mut reader = BufReader::new(stderr);
-            let mut buf = [0u8; 4096];
-            loop {
-                match reader.read(&mut buf).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        let mut t = tail.lock().await;
-                        t.push_str(&String::from_utf8_lossy(&buf[..n]));
-                        if t.len() > 4000 {
-                            let cut = t.len() - 4000;
-                            *t = t.split_off(cut);
+            use tokio::io::{AsyncBufReadExt, BufReader};
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                if let Some((is_video, codec)) = parse_stream_codec(&line) {
+                    let mut c = codecs.lock().await;
+                    if is_video {
+                        if c.video.is_none() {
+                            c.video = Some(codec);
                         }
+                    } else if c.audio.is_none() {
+                        c.audio = Some(codec);
                     }
+                }
+                let mut t = tail.lock().await;
+                t.push_str(&line);
+                t.push('\n');
+                if t.len() > 4000 {
+                    let cut = t.len() - 4000;
+                    *t = t.split_off(cut);
                 }
             }
         });
     }
 
     let manifest_path = output_dir.join("index.m3u8");
-    let timeout = if transcode {
+    let timeout = if !mode.video_copy {
         Duration::from_millis(25_000)
+    } else if !mode.audio_copy {
+        Duration::from_millis(20_000)
     } else {
         Duration::from_millis(15_000)
     };
-
-    // Wait for ffmpeg to produce a valid manifest.
-    let ok = wait_for_manifest(&manifest_path, &mut child, timeout).await;
-    if !ok {
-        let _ = child.start_kill();
-        let _ = tokio::fs::remove_dir_all(&output_dir).await;
-        let tail = stderr_tail.lock().await.trim().to_string();
-        let msg = if tail.is_empty() {
-            "Timed out waiting for ffmpeg HLS manifest".to_string()
-        } else {
-            tail
-        };
-        return Err(msg);
-    }
-
-    let session = Arc::new(Session {
-        output_dir,
-        child: Mutex::new(child),
-        last_access: AtomicI64::new(now_ms()),
-    });
-    state
-        .sessions
-        .lock()
-        .await
-        .insert(id.to_string(), session.clone());
-    Ok(session)
-}
-
-/// Poll until the manifest exists and contains #EXTM3U, or ffmpeg exits, or timeout.
-async fn wait_for_manifest(manifest_path: &PathBuf, child: &mut Child, timeout: Duration) -> bool {
     let deadline = tokio::time::Instant::now() + timeout;
+    let mut video_seen_at: Option<tokio::time::Instant> = None;
+
     loop {
+        // ffmpeg exited before producing a manifest → real failure.
         if let Ok(Some(_)) = child.try_wait() {
-            return false; // ffmpeg exited before producing a manifest
+            let _ = tokio::fs::remove_dir_all(&output_dir).await;
+            let tail = stderr_tail.lock().await.trim().to_string();
+            let msg = if tail.is_empty() {
+                "ffmpeg exited before producing an HLS manifest".to_string()
+            } else {
+                tail
+            };
+            return Err(StartError::Failed(msg));
         }
-        if let Ok(content) = tokio::fs::read_to_string(manifest_path).await {
-            if content.contains("#EXTM3U") {
-                return true;
+
+        // On the initial copy/detect attempt, decide copy-vs-transcode from the
+        // codecs ffmpeg reported. Only accept the copy output once the codecs are
+        // confirmed browser-native.
+        let mut codecs_ok = !detect;
+        if detect {
+            let detected = codecs.lock().await.clone();
+            if let Some(video) = detected.video.as_deref() {
+                if video_seen_at.is_none() {
+                    video_seen_at = Some(tokio::time::Instant::now());
+                }
+                if !video_browser_friendly(video) {
+                    // Video must be re-encoded; copy audio only if it's friendly.
+                    let audio_copy = detected
+                        .audio
+                        .as_deref()
+                        .map(audio_browser_friendly)
+                        .unwrap_or(false);
+                    let _ = child.start_kill();
+                    let _ = tokio::fs::remove_dir_all(&output_dir).await;
+                    return Err(StartError::Restart(EncodeMode { video_copy: false, audio_copy }));
+                }
+                if let Some(audio) = detected.audio.as_deref() {
+                    if !audio_browser_friendly(audio) {
+                        // Video is fine; only the audio needs re-encoding.
+                        let _ = child.start_kill();
+                        let _ = tokio::fs::remove_dir_all(&output_dir).await;
+                        return Err(StartError::Restart(EncodeMode {
+                            video_copy: true,
+                            audio_copy: false,
+                        }));
+                    }
+                }
+                // Video friendly; treat audio as decided once it's reported, or
+                // after a short settle (covers audio-less channels).
+                let audio_decided = detected.audio.is_some()
+                    || video_seen_at
+                        .map(|t| t.elapsed() > Duration::from_millis(800))
+                        .unwrap_or(false);
+                codecs_ok = audio_decided;
             }
         }
-        if tokio::time::Instant::now() >= deadline {
-            return false;
+
+        if codecs_ok {
+            if let Ok(content) = tokio::fs::read_to_string(&manifest_path).await {
+                if content.contains("#EXTM3U") {
+                    let session = Arc::new(Session {
+                        output_dir,
+                        child: Mutex::new(child),
+                        last_access: AtomicI64::new(now_ms()),
+                    });
+                    state
+                        .sessions
+                        .lock()
+                        .await
+                        .insert(id.to_string(), session.clone());
+                    return Ok(session);
+                }
+            }
         }
-        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        if tokio::time::Instant::now() >= deadline {
+            let _ = child.start_kill();
+            let _ = tokio::fs::remove_dir_all(&output_dir).await;
+            let tail = stderr_tail.lock().await.trim().to_string();
+            let msg = if tail.is_empty() {
+                "Timed out waiting for ffmpeg HLS manifest".to_string()
+            } else {
+                tail
+            };
+            return Err(StartError::Failed(msg));
+        }
+        tokio::time::sleep(Duration::from_millis(150)).await;
     }
 }
 
