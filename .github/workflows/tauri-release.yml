@@ -35,6 +35,11 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Sync version from tag
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: node scripts/set-version.mjs "${GITHUB_REF_NAME#v}"
+
       - name: Lint
         run: npm run lint
 
@@ -46,8 +51,9 @@ jobs:
         with:
           name: community-iptv-player-windows
           if-no-files-found: error
+          # Only the installers — the bare exe can't run standalone (it needs the
+          # bundled dist/ffmpeg the installer lays down next to it).
           path: |
-            src-tauri/target/release/community-iptv-player.exe
             src-tauri/target/release/bundle/msi/*.msi
             src-tauri/target/release/bundle/nsis/*.exe
 
@@ -57,7 +63,7 @@ jobs:
         with:
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
+          # Publish only the installers, not the standalone exe.
           files: |
-            src-tauri/target/release/community-iptv-player.exe
             src-tauri/target/release/bundle/msi/*.msi
             src-tauri/target/release/bundle/nsis/*.exe
