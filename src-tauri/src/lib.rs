@@ -53,27 +53,53 @@ fn resolve_ffmpeg() -> PathBuf {
 }
 
 /// Locate the built frontend (dist) to serve from the relay (mode A).
+///
+/// Checks every layout the bundle can take, because the installed app and the
+/// dev run resolve `dist` differently and the Tauri resource bundler has a `../`
+/// quirk. Whichever exists wins.
 fn resolve_web_dir(app: &tauri::App) -> Option<PathBuf> {
-    // Bundled: dist is copied into the resource dir.
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    // Bundled: resources land in the resource dir (and, for `../dist` sources,
+    // sometimes under an `_up_` folder due to a Tauri quirk).
     if let Ok(res) = app.path().resource_dir() {
-        let candidate = res.join("dist");
-        if candidate.join("index.html").exists() {
-            return Some(candidate);
+        candidates.push(res.join("dist"));
+        candidates.push(res.join("_up_").join("dist"));
+        candidates.push(res.clone());
+    }
+    // Installed app: `dist` is shipped next to the executable.
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join("dist"));
         }
     }
     // Dev (`cargo run` / `tauri dev`): dist sits next to src-tauri.
     if let Ok(cwd) = std::env::current_dir() {
-        for c in [cwd.join("dist"), cwd.join("../dist")] {
-            if c.join("index.html").exists() {
-                return Some(c);
-            }
-        }
+        candidates.push(cwd.join("dist"));
+        candidates.push(cwd.join("..").join("dist"));
     }
-    None
+
+    let found = candidates
+        .into_iter()
+        .find(|c| c.join("index.html").exists());
+    if found.is_none() {
+        log::error!("[relay] could not locate the frontend dist — the window will be blank");
+    }
+    found
+}
+
+/// Stable WebView2 storage directory. Pinning it to one fixed path (independent
+/// of the exe location and whether this is a dev or bundled build) forces every
+/// build/location to share one storage profile, so localStorage AND IndexedDB
+/// (the user's saved playlists) aren't reset on rebuild/reinstall. WebView2
+/// creates its own `EBWebView` subfolder here, so we pass the parent (the same
+/// path Tauri uses by default) — NOT joined with `EBWebView`, which would nest.
+fn webview_data_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
+    app.path().app_local_data_dir().ok()
 }
 
 fn build_window(app: &tauri::AppHandle) -> tauri::Result<()> {
-    WebviewWindowBuilder::new(
+    let mut builder = WebviewWindowBuilder::new(
         app,
         "main",
         WebviewUrl::External(RELAY_HOST_URL.parse().expect("valid relay url")),
@@ -82,7 +108,22 @@ fn build_window(app: &tauri::AppHandle) -> tauri::Result<()> {
     .inner_size(1280.0, 800.0)
     .min_inner_size(800.0, 600.0)
     .resizable(true)
-    .build()?;
+    // Keep WebView2 audio IN the window's renderer process. By default Chromium
+    // renders audio in a separate "audio service" process, so when a user shares
+    // THIS window (Discord/Teams/etc.) the per-window audio capture misses the
+    // sound. Disabling AudioServiceOutOfProcess routes audio through the window's
+    // process so it's captured with the window. (The other flags are Tauri's
+    // defaults, which additional_browser_args would otherwise replace.)
+    .additional_browser_args(
+        "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,AudioServiceOutOfProcess --autoplay-policy=no-user-gesture-required",
+    );
+
+    // Pin the storage profile so saved playlists survive rebuilds/reinstalls.
+    if let Some(dir) = webview_data_dir(app) {
+        builder = builder.data_directory(dir);
+    }
+
+    builder.build()?;
     Ok(())
 }
 
@@ -156,8 +197,12 @@ pub fn run() {
         .setup(|app| {
             let web_dir = resolve_web_dir(app);
             let ffmpeg = resolve_ffmpeg();
+            // Durable playlist backup lives in the app's local data dir — a stable
+            // location that outlives the WebView storage profile.
+            let backup_dir = app.path().app_local_data_dir().ok();
             log::info!("[relay] ffmpeg: {}", ffmpeg.display());
             log::info!("[relay] web_dir: {:?}", web_dir);
+            log::info!("[relay] backup_dir: {:?}", backup_dir);
 
             match bind_relay_listener()? {
                 Some(std_listener) => {
@@ -167,7 +212,7 @@ pub fn run() {
                     tauri::async_runtime::spawn(async move {
                         let listener = tokio::net::TcpListener::from_std(std_listener)
                             .expect("convert std listener to tokio");
-                        let router = relay::router(web_dir, ffmpeg);
+                        let router = relay::router(web_dir, ffmpeg, backup_dir);
                         if let Err(e) = axum::serve(listener, router).await {
                             log::error!("[relay] server error: {e}");
                         }

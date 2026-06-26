@@ -7,7 +7,7 @@ import type {
 } from "../types/models";
 import type { AppSettings } from "../types/player";
 
-const STORAGE_KEY = "iptv-player-state-v1";
+export const STORAGE_KEY = "iptv-player-state-v1";
 const clampVolume = (value: number): number => Math.min(2, Math.max(0, value));
 
 export interface LastPlayedWatch {

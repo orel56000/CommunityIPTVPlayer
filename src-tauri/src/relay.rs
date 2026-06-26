@@ -61,10 +61,13 @@ pub struct RelayState {
     /// 1=available, 2=unavailable. Lets heavy (4K/HEVC) transcodes run on the
     /// GPU in real time instead of choking libx264 on the CPU.
     nvenc: Arc<AtomicU8>,
+    /// Directory for the durable playlist backup file (a stable on-disk copy of
+    /// the user's playlists, independent of the WebView storage profile).
+    backup_dir: Option<Arc<PathBuf>>,
 }
 
 impl RelayState {
-    fn new(ffmpeg: PathBuf) -> Self {
+    fn new(ffmpeg: PathBuf, backup_dir: Option<PathBuf>) -> Self {
         let http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::limited(5))
             .build()
@@ -75,6 +78,7 @@ impl RelayState {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             starting: Arc::new(Mutex::new(HashMap::new())),
             nvenc: Arc::new(AtomicU8::new(0)),
+            backup_dir: backup_dir.map(Arc::new),
         }
     }
 }
@@ -109,8 +113,9 @@ fn now_ms() -> i64 {
 /// window can load http://127.0.0.1:PORT and the app's *relative* /api calls are
 /// same-origin (mode A: server + UI). Pass `None` for headless mode B.
 /// `ffmpeg` is the path to the ffmpeg binary used for the live restream.
-pub fn router(web_dir: Option<PathBuf>, ffmpeg: PathBuf) -> Router {
-    let state = RelayState::new(ffmpeg);
+/// `backup_dir` is where the durable playlist backup file is stored.
+pub fn router(web_dir: Option<PathBuf>, ffmpeg: PathBuf, backup_dir: Option<PathBuf>) -> Router {
+    let state = RelayState::new(ffmpeg, backup_dir);
 
     // Spawn the idle-session reaper (mirrors restreamManager's setInterval).
     {
@@ -130,6 +135,14 @@ pub fn router(web_dir: Option<PathBuf>, ffmpeg: PathBuf) -> Router {
         .route("/api/stream", get(stream))
         .route("/api/restream/index.m3u8", get(restream_manifest))
         .route("/api/restream/:session/:file", get(restream_segment))
+        // Durable playlist backup (a file on disk, independent of WebView storage).
+        // Allow a large body — playlists with thousands of items can be many MB.
+        .route(
+            "/api/backup",
+            get(backup_get)
+                .put(backup_put)
+                .route_layer(axum::extract::DefaultBodyLimit::max(256 * 1024 * 1024)),
+        )
         .with_state(state);
 
     if let Some(dir) = web_dir {
@@ -155,6 +168,46 @@ async fn health() -> Response {
         env!("CARGO_PKG_VERSION")
     );
     ([(header::CONTENT_TYPE, "application/json")], body).into_response()
+}
+
+// ---------------------------------------------------------------------------
+// /api/backup — durable playlist backup (survives WebView storage resets)
+// ---------------------------------------------------------------------------
+
+fn backup_path(state: &RelayState) -> Option<PathBuf> {
+    state
+        .backup_dir
+        .as_ref()
+        .map(|dir| dir.join("playlist-backup.json"))
+}
+
+async fn backup_get(State(state): State<RelayState>) -> Response {
+    let Some(path) = backup_path(&state) else {
+        return StatusCode::NO_CONTENT.into_response();
+    };
+    match tokio::fs::read(&path).await {
+        Ok(bytes) => ([(header::CONTENT_TYPE, "application/json")], bytes).into_response(),
+        Err(_) => StatusCode::NO_CONTENT.into_response(),
+    }
+}
+
+async fn backup_put(State(state): State<RelayState>, body: axum::body::Bytes) -> Response {
+    let (Some(dir), Some(path)) = (state.backup_dir.as_ref(), backup_path(&state)) else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "No backup directory").into_response();
+    };
+    if let Err(e) = tokio::fs::create_dir_all(dir.as_ref()).await {
+        return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+    }
+    // Write to a temp file then rename, so a crash mid-write can't corrupt the
+    // existing backup.
+    let tmp = dir.join("playlist-backup.json.tmp");
+    if let Err(e) = tokio::fs::write(&tmp, &body).await {
+        return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+    }
+    match tokio::fs::rename(&tmp, &path).await {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
 }
 
 #[derive(Serialize)]

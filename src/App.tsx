@@ -39,6 +39,7 @@ import { now } from "./utils/time";
 import { playlistDb } from "./utils/indexedDb";
 import { loadPlaylistSource } from "./utils/loadPlaylistSource";
 import { loadXtreamSeriesEpisodes } from "./utils/xtream";
+import { backupToBackend } from "./utils/backendBackup";
 import { serializePlaylistItemsToM3u } from "./utils/exportM3u";
 import { resolveRecentDisplayItem, resolveRecentItemId } from "./utils/recentItems";
 
@@ -106,6 +107,22 @@ const App = () => {
     }
     setStorageError(null);
   }, [state]);
+
+  // Mirror playlists to the relay's durable on-disk backup after meaningful
+  // changes settle (debounced). Keyed on playlist/library changes, NOT on
+  // playback progress, so it doesn't churn while watching. No-op without a relay.
+  useEffect(() => {
+    const handle = window.setTimeout(() => {
+      void backupToBackend();
+    }, 6000);
+    return () => window.clearTimeout(handle);
+  }, [
+    state.playlists,
+    state.favorites,
+    state.recents,
+    state.settings,
+    state.activePlaylistId,
+  ]);
 
   useEffect(() => {
     const needsHydration = state.playlists.filter((playlist) => playlist.itemCount > 0 && playlist.items.length === 0);
