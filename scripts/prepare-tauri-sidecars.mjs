@@ -1,4 +1,4 @@
-import { copyFile, mkdir, stat } from "node:fs/promises";
+import { chmod, copyFile, mkdir, stat } from "node:fs/promises";
 import path from "node:path";
 import ffmpegPath from "ffmpeg-static";
 
@@ -30,5 +30,11 @@ const outPath = path.join(outDir, `ffmpeg-${targetTriple}${ext}`);
 
 await mkdir(outDir, { recursive: true });
 await copyFile(ffmpegPath, outPath);
+
+// copyFile doesn't reliably preserve the executable bit; the bundled sidecar
+// must stay runnable on macOS/Linux.
+if (process.platform !== "win32") {
+  await chmod(outPath, 0o755);
+}
 
 console.log(`Prepared Tauri ffmpeg sidecar: ${outPath}`);
