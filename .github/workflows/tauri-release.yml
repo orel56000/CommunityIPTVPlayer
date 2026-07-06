@@ -9,6 +9,12 @@ on:
 permissions:
   contents: write
 
+# Cancel a superseded run for the same ref (e.g. a re-pushed tag) so we don't
+# burn macOS runner minutes finishing a build that's already stale.
+concurrency:
+  group: tauri-release-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     name: ${{ matrix.label }}
@@ -83,9 +89,42 @@ jobs:
       - name: Lint
         run: npm run lint
 
-      # Runs scripts/prepare-tauri-sidecars.mjs (per-platform ffmpeg via
-      # ffmpeg-static) then `tauri build`.
+      # Decide whether this macOS build can be Developer ID signed + notarized.
+      # It can only when the maintainer has added the Apple secrets below. The
+      # printed value is just the boolean `true`/`false`, never the secrets.
+      - name: Detect macOS signing secrets
+        id: macsign
+        if: runner.os == 'macOS'
+        shell: bash
+        run: echo "enabled=${{ secrets.APPLE_SIGNING_IDENTITY != '' && secrets.APPLE_CERTIFICATE != '' }}" >> "$GITHUB_OUTPUT"
+
+      # macOS, signed + notarized. Tauri's bundler imports APPLE_CERTIFICATE (a
+      # base64 .p12) into a throwaway keychain, signs the .app with
+      # APPLE_SIGNING_IDENTITY, then notarizes + staples via the Apple ID creds —
+      # producing a DMG that opens with NO Gatekeeper warning. Runs only when the
+      # secrets are present so the default open-source build never breaks.
+      - name: Build Tauri bundles (signed + notarized)
+        if: runner.os == 'macOS' && steps.macsign.outputs.enabled == 'true'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: npm run tauri:build
+
+      - name: Note unsigned macOS build
+        if: runner.os == 'macOS' && steps.macsign.outputs.enabled != 'true'
+        shell: bash
+        run: |
+          echo "::notice title=Unsigned macOS build::No Apple signing secrets configured, so this DMG is unsigned. It works, but after downloading users must clear quarantine once with: xattr -cr '/Applications/Community IPTV Player.app'. Add the APPLE_* repo secrets to enable notarization."
+
+      # Windows, Linux, and the unsigned macOS fallback. Runs
+      # scripts/prepare-tauri-sidecars.mjs (per-platform ffmpeg via ffmpeg-static)
+      # then `tauri build`.
       - name: Build Tauri bundles
+        if: runner.os != 'macOS' || steps.macsign.outputs.enabled != 'true'
         run: npm run tauri:build
 
       - name: Upload workflow artifacts
