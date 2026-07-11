@@ -1,5 +1,6 @@
 import type { ImportResult, PlaylistSource } from "../types/models";
 import { parseM3u, parseM3uChunked } from "./parseM3u";
+import { toRelayUrl } from "./secureUrl";
 import { importXtreamPlaylist, xtreamSourceFromUrl } from "./xtream";
 
 interface LoadPlaylistSourceOptions {
@@ -14,9 +15,17 @@ export interface LoadPlaylistSourceResult extends ImportResult {
 }
 
 const fetchPlaylistText = async (url: string): Promise<string> => {
-  const response = await fetch(url, {
-    headers: { accept: "application/x-mpegURL, application/vnd.apple.mpegurl, text/plain;q=0.9, */*;q=0.8" },
-  });
+  // Same reason as xtream.ts fetchJson: fetch remote M3U through the relay proxy
+  // so the WebView isn't blocked by the provider's missing CORS headers.
+  let response: Response;
+  try {
+    response = await fetch(toRelayUrl(url), {
+      headers: { accept: "application/x-mpegURL, application/vnd.apple.mpegurl, text/plain;q=0.9, */*;q=0.8" },
+    });
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(`Could not download the playlist (${reason}). Check the URL and your internet connection.`);
+  }
   if (!response.ok) {
     throw new Error(`Failed to fetch playlist (${response.status})`);
   }

@@ -1,5 +1,5 @@
 import type { ImportResult, PlaylistItem, XtreamSourceConfig } from "../types/models";
-import { cleanAssetUrl } from "./secureUrl";
+import { cleanAssetUrl, toRelayUrl } from "./secureUrl";
 import { computeShareIdFromUrl } from "./shareId";
 
 interface XtreamCategory {
@@ -113,9 +113,21 @@ const toStringRecord = (input: Record<string, unknown>, omit: string[] = []): Re
 };
 
 const fetchJson = async <T>(url: string): Promise<T> => {
-  const response = await fetch(url, {
-    headers: { accept: "application/json, text/plain;q=0.9, */*;q=0.8" },
-  });
+  // Go through the relay proxy (api/stream) instead of hitting the provider
+  // directly. A cross-origin fetch to the Xtream host is blocked by the WebView
+  // ("Load failed") because providers send no Access-Control-Allow-Origin; the
+  // relay fetches it server-side (from the user's home IP) and adds CORS.
+  let response: Response;
+  try {
+    response = await fetch(toRelayUrl(url), {
+      headers: { accept: "application/json, text/plain;q=0.9, */*;q=0.8" },
+    });
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `Could not reach the Xtream provider (${reason}). Check the host and your internet connection.`,
+    );
+  }
   if (!response.ok) {
     const message = (await response.text().catch(() => "")).slice(0, 180);
     throw new Error(message ? `Xtream request failed (${response.status}): ${message}` : `Xtream request failed (${response.status})`);
