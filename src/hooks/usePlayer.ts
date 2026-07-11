@@ -15,7 +15,16 @@ export const usePlayer = (defaultVolume: number) => {
 
   const actions = useMemo(
     () => ({
-      setCurrentItem: (item: PlaylistItem | null) => setState((prev) => ({ ...prev, currentItem: item, error: null, loading: !!item })),
+      setCurrentItem: (item: PlaylistItem | null) =>
+        setState((prev) => ({
+          ...prev,
+          // Re-selecting the item that is already current must RESTART playback
+          // (e.g. retry after a failed attempt). VideoPlayer re-runs its
+          // playback effect on reference change, so hand it a fresh object.
+          currentItem: item && prev.currentItem && item.id === prev.currentItem.id ? { ...item } : item,
+          error: null,
+          loading: !!item,
+        })),
       setLoading: (loading: boolean) => setState((prev) => ({ ...prev, loading })),
       setError: (error: string | null) => setState((prev) => ({ ...prev, error, loading: false })),
       setMuted: (muted: boolean) => setState((prev) => ({ ...prev, muted })),

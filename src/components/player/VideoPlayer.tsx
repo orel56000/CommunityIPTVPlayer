@@ -6,6 +6,7 @@ import type { PlaylistItem } from "../../types/models";
 import { useChromecast } from "../../hooks/useChromecast";
 import { downloadMediaFile, isHlsUrl } from "../../utils/downloadStream";
 import { categoryForSection, writeHttpsCapability } from "../../utils/httpsCapability";
+import { servedByLocalRelay } from "../../utils/relayDiscovery";
 import { toRelayUrl } from "../../utils/secureUrl";
 import { buildLivePlaybackAttempts, toXtreamTsUrl } from "../../utils/xtreamStreamUrl";
 import { PlayerOverlay } from "./PlayerOverlay";
@@ -125,9 +126,12 @@ const isCrossOriginStream = (url: string): boolean => {
 };
 
 const hasMpegTsSyncByte = (bytes: Uint8Array): boolean => {
-  const limit = Math.min(bytes.length, 1024);
-  for (let i = 0; i < limit; i += 1) {
-    if (bytes[i] === 0x47) return true;
+  // A real transport stream has 0x47 at the START of each 188-byte packet.
+  // Requiring two aligned sync bytes avoids classifying any payload that
+  // merely CONTAINS a 0x47 (e.g. an MP4 header) as MPEG-TS.
+  if (bytes.length < 189) return bytes.length > 0 && bytes[0] === 0x47;
+  for (let offset = 0; offset < Math.min(bytes.length - 188, 188); offset += 1) {
+    if (bytes[offset] === 0x47 && bytes[offset + 188] === 0x47) return true;
   }
   return false;
 };
@@ -187,7 +191,8 @@ const playbackErrorMessage = (code: number): string => `${GENERIC_PLAYBACK_MESSA
  * is what identifies the failure:
  *   1 XUI.one debug page · 2 Cloudflare challenge · 3 other HTML page ·
  *   4 .m3u8 URL serving MPEG-TS · 5 .m3u8 URL not returning a manifest ·
- *   6 .ts URL returning a manifest · 7 fetch/CORS failure · 8 non-HLS payload.
+ *   6 .ts URL returning a manifest · 7 fetch/CORS failure · 8 non-HLS payload ·
+ *   10 video track present but no frames rendered (WKWebView layer stall).
  */
 const diagnosticFailureCode = (
   diagnostic: Record<string, unknown>,
@@ -345,6 +350,15 @@ export const VideoPlayer = ({
 
   const [loading, setLoading] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  // Incremented by the error box's "Try again" — re-runs the playback effect
+  // for the same item (provider hiccups like connection limits are transient).
+  const [retryNonce, setRetryNonce] = useState(0);
+  // Frame-watchdog auto-reload budget, per item (prevents reload loops).
+  const autoRecoverRef = useRef<{ id: string; count: number }>({ id: "", count: 0 });
+  // Fallback fullscreen for macOS WKWebView, where the element Fullscreen API
+  // can't be enabled without breaking video rendering: the player covers the
+  // page via CSS while the native window goes fullscreen through the relay.
+  const [cssFullscreen, setCssFullscreen] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
   const [currentTime, setCurrentTime] = useState(0);
@@ -596,6 +610,8 @@ export const VideoPlayer = ({
       onPlayingStateRef.current(false);
       return;
     }
+    // retryNonce is a dependency so "Try again" re-runs this effect verbatim.
+    void retryNonce;
     setLoading(true);
     setLocalError(null);
     onErrorRef.current(null);
@@ -626,6 +642,10 @@ export const VideoPlayer = ({
     const onPlay = () => {
       setIsPlaying(true);
       onPlayingStateRef.current(true);
+      // Playback genuinely (re)started — clear any stale error, e.g. a slow
+      // restream that recovered, or "press play to start" after a manual play.
+      setLocalError(null);
+      onErrorRef.current(null);
     };
     const onPause = () => {
       setIsPlaying(false);
@@ -676,10 +696,10 @@ export const VideoPlayer = ({
       if (playbackStarted) return;
       playbackStarted = true;
       httpFallbackUrl = null;
-      // Real playback has begun — clear any error a slower earlier attempt left
-      // on screen (e.g. a restream that recovered a couple of seconds later).
-      setLocalError(null);
-      onErrorRef.current(null);
+      // NOTE: do not clear errors here — this also fires on `loadeddata`, which
+      // arrives even when autoplay was rejected, and would erase the
+      // "press play to start" message leaving a silent paused player. Errors
+      // are cleared on the `play`/`playing` events (real playback) instead.
       if (testingHttps && currentSchemeHttps) {
         writeHttpsCapability(streamUrl, category, "yes");
         console.info("[IPTV][Player] HTTPS works for this category — cached 'yes'", { category });
@@ -980,8 +1000,14 @@ export const VideoPlayer = ({
         JSON.stringify({ ...playbackContext, playbackPlan, streamProbe: latestDiagnostic }, null, 2),
       );
 
+      // Only hard-block playback when the probe POSITIVELY identified a bad
+      // payload (HTML page, wrong container). If the probe itself couldn't
+      // fetch (probeFetch !== "ok" — e.g. a transient stall or the provider's
+      // single connection being busy), still let the video element try: the
+      // probe is diagnostic, and playback often succeeds seconds later. Real
+      // failures still surface through failPlayback with a fresh diagnostic.
       const probeBlockMessage = userMessageFromDiagnostic(latestDiagnostic, playbackMode);
-      if (probeBlockMessage && latestDiagnostic.payloadKind !== "unknown") {
+      if (probeBlockMessage && latestDiagnostic.payloadKind !== "unknown" && latestDiagnostic.probeFetch === "ok") {
         failPlayback("stream-probe-blocked", { userMessage: probeBlockMessage }, latestDiagnostic);
         return;
       }
@@ -1161,7 +1187,7 @@ export const VideoPlayer = ({
         audioContextRef.current = null;
       }
     };
-  }, [item, autoplay, clearStartupTimer, destroyMpegTsPlayer, playbackBlocked]);
+  }, [item, autoplay, clearStartupTimer, destroyMpegTsPlayer, playbackBlocked, retryNonce]);
 
   useEffect(() => {
     const onFsChange = () => {
@@ -1170,6 +1196,67 @@ export const VideoPlayer = ({
     document.addEventListener("fullscreenchange", onFsChange);
     return () => document.removeEventListener("fullscreenchange", onFsChange);
   }, []);
+
+  // Frame watchdog: WKWebView occasionally plays AUDIO while the video layer
+  // never presents a frame (fixed by a manual reload). Detect "playing, video
+  // track present, zero frames presented" and self-heal: first nudge the
+  // decoder with a micro-seek, then reload the source (bounded per item).
+  useEffect(() => {
+    const video = videoRef.current as
+      | (HTMLVideoElement & { requestVideoFrameCallback?: (cb: () => void) => number })
+      | null;
+    if (!video || !item) return;
+    if (typeof video.requestVideoFrameCallback !== "function") return;
+
+    let cancelled = false;
+    let nudged = false;
+    let timer: number | null = null;
+
+    const arm = () => {
+      if (cancelled) return;
+      let gotFrame = false;
+      video.requestVideoFrameCallback?.(() => {
+        gotFrame = true;
+      });
+      if (timer) window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        if (cancelled || gotFrame || video.paused || video.readyState < 2) return;
+        // videoWidth === 0 means an audio-only stream — nothing to heal.
+        if (video.videoWidth === 0) return;
+        if (autoRecoverRef.current.id !== item.id) {
+          autoRecoverRef.current = { id: item.id, count: 0 };
+        }
+        if (!nudged) {
+          nudged = true;
+          console.warn("[IPTV][Player] playing but no video frames — nudging decoder");
+          try {
+            video.currentTime = video.currentTime + 0.01;
+          } catch {
+            /* ignore */
+          }
+          arm();
+          return;
+        }
+        if (autoRecoverRef.current.count < 2) {
+          autoRecoverRef.current.count += 1;
+          console.warn("[IPTV][Player] still no video frames — auto-reloading source");
+          setRetryNonce((nonce) => nonce + 1);
+        } else {
+          const message = playbackErrorMessage(10);
+          setLocalError(message);
+          onErrorRef.current(message);
+        }
+      }, 3000);
+    };
+
+    const onPlaying = () => arm();
+    video.addEventListener("playing", onPlaying);
+    return () => {
+      cancelled = true;
+      if (timer) window.clearTimeout(timer);
+      video.removeEventListener("playing", onPlaying);
+    };
+  }, [item, retryNonce]);
 
   const title = useMemo(() => item?.title ?? "No stream selected", [item]);
 
@@ -1244,16 +1331,48 @@ export const VideoPlayer = ({
   const toggleFullscreen = useCallback(async () => {
     const container = containerRef.current;
     if (!container) return;
-    try {
-      if (document.fullscreenElement) {
+
+    // Exit whichever fullscreen mode is active.
+    if (document.fullscreenElement) {
+      try {
         await document.exitFullscreen();
-      } else {
-        await container.requestFullscreen();
+      } catch {
+        /* ignore */
       }
-    } catch {
-      /* user-gesture or permission issue — silently ignore */
+      return;
     }
-  }, []);
+    if (cssFullscreen) {
+      setCssFullscreen(false);
+      if (servedByLocalRelay()) {
+        void fetch("/api/window/fullscreen?on=false", { method: "POST" }).catch(() => undefined);
+      }
+      return;
+    }
+
+    // macOS WKWebView (the bundled window): every WebKit-native fullscreen
+    // route is broken here — the fullscreen preference (KVC or public API)
+    // and AVKit presentation mode all destroy video rendering, and
+    // requestFullscreen "succeeds" as a whole-page fullscreen. Go straight to
+    // CSS fullscreen (only the player covers the page, our controls intact)
+    // plus true native WINDOW fullscreen via the relay.
+    const isMacWebKitWindow =
+      servedByLocalRelay() && /Mac/i.test(navigator.userAgent) && !/Chrom/i.test(navigator.userAgent);
+    if (!isMacWebKitWindow) {
+      // Standard element Fullscreen API (browsers, Windows WebView2).
+      try {
+        if (typeof container.requestFullscreen !== "function") throw new Error("unavailable");
+        await container.requestFullscreen();
+        return;
+      } catch {
+        /* fall through to CSS fullscreen */
+      }
+    }
+
+    setCssFullscreen(true);
+    if (servedByLocalRelay()) {
+      void fetch("/api/window/fullscreen?on=true", { method: "POST" }).catch(() => undefined);
+    }
+  }, [cssFullscreen]);
 
   const togglePip = useCallback(async () => {
     const video = videoRef.current;
@@ -1284,8 +1403,14 @@ export const VideoPlayer = ({
       const target = event.target as HTMLElement | null;
       if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
       const withinPlayer = el.contains(target);
-      if (!withinPlayer && !isFullscreen) return;
+      if (!withinPlayer && !isFullscreen && !cssFullscreen) return;
       switch (event.key.toLowerCase()) {
+        case "escape":
+          if (cssFullscreen) {
+            event.preventDefault();
+            void toggleFullscreen();
+          }
+          break;
         case " ":
         case "k":
           event.preventDefault();
@@ -1343,6 +1468,7 @@ export const VideoPlayer = ({
     return () => document.removeEventListener("keydown", handler);
   }, [
     bumpControls,
+    cssFullscreen,
     handleOverlayVolume,
     isFullscreen,
     skipBy,
@@ -1373,11 +1499,23 @@ export const VideoPlayer = ({
     }
   }, [item]);
   return (
-    <div className={clsx("panel flex min-h-0 flex-col overflow-hidden", className)}>
+    <div
+      className={clsx(
+        // `.panel` applies backdrop-filter, which makes this div the containing
+        // block for fixed descendants — with it, the fullscreen player would
+        // "cover" only its own panel. Drop it while in CSS fullscreen.
+        cssFullscreen ? "flex min-h-0 flex-col" : "panel flex min-h-0 flex-col overflow-hidden",
+        className,
+      )}
+    >
       <div
         ref={containerRef}
         className={clsx(
-          "player-viewport group/player relative",
+          "player-viewport group/player",
+          // CSS fullscreen fallback: cover the whole page above the app chrome.
+          // Must REPLACE `relative`, not sit beside it — Tailwind's `relative`
+          // rule comes after `fixed` in the stylesheet and would win.
+          cssFullscreen ? "fixed inset-0 z-[100] bg-black" : "relative",
           // Hide the cursor with the controls during playback (e.g. fullscreen);
           // any pointer move re-shows both via bumpControls.
           !controlsVisible && "cursor-none",
@@ -1405,7 +1543,7 @@ export const VideoPlayer = ({
           error={localError}
           isPlaying={displayPlaying}
           isLive={isLive}
-          isFullscreen={isFullscreen}
+          isFullscreen={isFullscreen || cssFullscreen}
           canPip={canPip}
           canCast={canCast}
           castActive={isCasting}
@@ -1433,8 +1571,12 @@ export const VideoPlayer = ({
           downloadHint={downloadHint}
           isHlsStream={item ? isHlsUrl(item.streamUrl) : false}
           onDownload={() => void handleDownload()}
-          errorActionLabel={playbackBlocked ? "Connect backend" : undefined}
-          onErrorAction={playbackBlocked ? onPlaybackBlockedAction : undefined}
+          errorActionLabel={playbackBlocked ? "Connect backend" : "Try again"}
+          onErrorAction={
+            playbackBlocked
+              ? onPlaybackBlockedAction
+              : () => setRetryNonce((nonce) => nonce + 1)
+          }
         />
       </div>
     </div>

@@ -231,12 +231,23 @@ const App = () => {
   const initialPlayerVolume = state.settings.rememberedVolume ?? state.settings.defaultVolume;
   const { playerState, setCurrentItem, setError, setPlaying, setVolume, setMuted } = usePlayer(initialPlayerVolume);
 
+  // Hold the launch auto-restore until the WebView has warmed up. Attaching a
+  // video during the very first paints reliably reproduces WKWebView's
+  // audio-only/black-layer state (the VideoPlayer frame watchdog is the cure;
+  // this is the prevention).
+  const [warmedUp, setWarmedUp] = useState(false);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setWarmedUp(true), 700);
+    return () => window.clearTimeout(timer);
+  }, []);
+
   useEffect(() => {
     if (deepLink) {
       restoredLastVisitRef.current = true;
       return;
     }
     if (restoredLastVisitRef.current) return;
+    if (!warmedUp) return;
     if (location.pathname !== "/") {
       restoredLastVisitRef.current = true;
       return;
@@ -280,6 +291,7 @@ const App = () => {
     setCurrentItem,
     setSection,
     setActivePlaylistId,
+    warmedUp,
   ]);
 
   useEffect(() => {
@@ -498,6 +510,9 @@ const App = () => {
 
   useEffect(() => {
     if (!deepLink) return;
+    // Same warm-up hold as the launch restore: don't attach a video into a
+    // cold WebView (audio-only/black-layer state).
+    if (!warmedUp) return;
     const { playlistName, shareId } = deepLink;
     const key = `${playlistName}\0${shareId}`;
 
@@ -589,6 +604,7 @@ const App = () => {
     state.lastPlayedItem,
     state.lastPlayedWatch,
     state.playlists,
+    warmedUp,
   ]);
 
   const handleToggleFavorite = (item: PlaylistItem) => toggleFavorite(item.playlistId, item.id);

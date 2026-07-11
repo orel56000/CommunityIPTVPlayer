@@ -304,7 +304,6 @@ export const SearchOverlay = ({
                   : category === "all" && !debouncedQuery.trim()
                     ? "Type to search across Live TV, Movies, Series, and Catch-up"
                     : `${filteredItems.length.toLocaleString()} result${filteredItems.length === 1 ? "" : "s"}`}
-                <span className="ml-2 text-[10px] text-slate-600">v7</span>
               </span>
             </div>
           </>
