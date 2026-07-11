@@ -2,6 +2,7 @@ import type {
   ContinueWatchingEntry,
   FavoriteEntry,
   PlaybackProgress,
+  PlaylistItem,
   RecentEntry,
   SavedPlaylist,
 } from "../types/models";
@@ -26,6 +27,10 @@ export interface PersistedState {
   settings: AppSettings;
   lastPlayedId: string | null;
   lastPlayedWatch: LastPlayedWatch | null;
+  // The full last-played item, so a refresh can restore playback even when the
+  // item isn't in the (compacted / lazily-loaded) playlist — e.g. a series
+  // episode whose episodes haven't been re-fetched yet.
+  lastPlayedItem: PlaylistItem | null;
   section: string;
 }
 
@@ -47,6 +52,7 @@ const defaultState: PersistedState = {
   },
   lastPlayedId: null,
   lastPlayedWatch: null,
+  lastPlayedItem: null,
   section: "live",
 };
 
@@ -132,6 +138,12 @@ export const storage = {
                   typeof parsed.lastPlayedWatch.itemId === "string" ? parsed.lastPlayedWatch.itemId : undefined,
               }
             : defaultState.lastPlayedWatch,
+        lastPlayedItem:
+          parsed.lastPlayedItem &&
+          typeof parsed.lastPlayedItem.id === "string" &&
+          typeof parsed.lastPlayedItem.streamUrl === "string"
+            ? parsed.lastPlayedItem
+            : defaultState.lastPlayedItem,
       };
     } catch {
       return defaultState;

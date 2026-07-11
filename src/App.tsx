@@ -296,11 +296,12 @@ const App = () => {
         prev.lastPlayedId === item.id &&
         prev.lastPlayedWatch?.playlistName === watch.playlistName &&
         prev.lastPlayedWatch?.shareId === watch.shareId &&
-        prev.lastPlayedWatch?.itemId === watch.itemId
+        prev.lastPlayedWatch?.itemId === watch.itemId &&
+        prev.lastPlayedItem?.id === item.id
       ) {
         return prev;
       }
-      return { ...prev, lastPlayedId: item.id, lastPlayedWatch: watch };
+      return { ...prev, lastPlayedId: item.id, lastPlayedWatch: watch, lastPlayedItem: item };
     });
 
     if (location.pathname !== target) navigate(target, { replace: true });
@@ -513,6 +514,34 @@ const App = () => {
     }
 
     if (resolution.status === "not_found") {
+      // On a normal refresh the deep link IS the user's own last-played item.
+      // If it can't be matched in the (compacted / lazily-loaded) playlist —
+      // e.g. a series episode whose episodes haven't been re-fetched yet —
+      // restore the saved item directly instead of showing a share-mismatch error.
+      const savedItem = state.lastPlayedItem;
+      if (
+        savedItem &&
+        state.lastPlayedWatch?.playlistName === playlistName &&
+        state.lastPlayedWatch?.shareId === shareId
+      ) {
+        setDeepLinkError(null);
+        if (playerState.currentItem?.id === savedItem.id) {
+          appliedDeepLinkKey.current = key;
+          return;
+        }
+        if (appliedDeepLinkKey.current === key) return;
+        if (!canPlayVideos) {
+          showBackendRequired();
+          return;
+        }
+        appliedDeepLinkKey.current = key;
+        if (savedItem.playlistId !== state.activePlaylistId) setActivePlaylistId(savedItem.playlistId);
+        setSection(savedItem.section);
+        setCurrentItem(savedItem);
+        pushRecentForItem(savedItem);
+        return;
+      }
+
       if (!resolution.playlist && state.playlists.length > 0) {
         setDeepLinkError(
           `No playlist named “${playlistName}”. Links use the exact playlist name — rename or import a playlist to match.`,
@@ -555,7 +584,9 @@ const App = () => {
     setActivePlaylistId,
     setCurrentItem,
     setSection,
+    state.activePlaylistId,
     state.lastPlayedId,
+    state.lastPlayedItem,
     state.lastPlayedWatch,
     state.playlists,
   ]);

@@ -175,58 +175,55 @@ const describePayloadKind = (kind: StreamPayloadKind): string => {
   }
 };
 
-const userMessageFromDiagnostic = (
+// User-facing playback errors are intentionally generic: a short "try again"
+// with a stable numeric code. The full technical detail (provider debug page,
+// codec/container mismatch, CORS, etc.) is still written to the console by
+// logPlaybackReport, so the code alone is enough to look up what happened.
+const GENERIC_PLAYBACK_MESSAGE = "Something went wrong, please try again later";
+const playbackErrorMessage = (code: number): string => `${GENERIC_PLAYBACK_MESSAGE} (#${code})`;
+
+/**
+ * Map a stream diagnostic to a stable error code. The mapping (not the wording)
+ * is what identifies the failure:
+ *   1 XUI.one debug page · 2 Cloudflare challenge · 3 other HTML page ·
+ *   4 .m3u8 URL serving MPEG-TS · 5 .m3u8 URL not returning a manifest ·
+ *   6 .ts URL returning a manifest · 7 fetch/CORS failure · 8 non-HLS payload.
+ */
+const diagnosticFailureCode = (
   diagnostic: Record<string, unknown>,
   playbackMode: PlaybackMode,
-): string | null => {
+): number | null => {
   const preview = String(diagnostic.bodyPreviewText ?? "").toLowerCase();
   const payloadKind = diagnostic.payloadKind;
   const urlExtension = String(diagnostic.urlExtension ?? "");
 
-  if (preview.includes("xui.one") && preview.includes("debug mode")) {
-    return "Provider panel (XUI.one) is in Debug Mode and returned an HTML page instead of video. Ask your provider to disable debug mode, or re-import with Live output: MPEG-TS (.ts).";
-  }
+  if (preview.includes("xui.one") && preview.includes("debug mode")) return 1;
   if (payloadKind === "html") {
-    if (preview.includes("cloudflare") || preview.includes("just a moment")) {
-      return "Provider returned a Cloudflare challenge page instead of video. Native IPTV apps may still work; browser playback is blocked.";
-    }
-    return "Provider returned an HTML page instead of a video stream (HTTP 200 but not video data).";
+    return preview.includes("cloudflare") || preview.includes("just a moment") ? 2 : 3;
   }
-  if (urlExtension === "m3u8" && payloadKind === "mpegts") {
-    return "This URL ends in .m3u8 but the server sends MPEG-TS. Re-import the playlist with Live output: MPEG-TS (.ts).";
-  }
-  if (urlExtension === "m3u8" && payloadKind !== "hls-manifest" && diagnostic.probeFetch === "ok") {
-    return `URL ends in .m3u8 but the server did not return an HLS manifest (got: ${String(diagnostic.payloadMeaning ?? payloadKind)}). Re-import with Live output: MPEG-TS (.ts).`;
-  }
-  if (urlExtension === "ts" && payloadKind === "hls-manifest") {
-    return "URL ends in .ts but the server returned an HLS manifest. Re-import with Live output: HLS (.m3u8).";
-  }
-  if (diagnostic.probeFetch === "failed") {
-    return `Browser could not fetch the stream directly from the provider (${String(diagnostic.fetchError ?? "network/CORS")}). The provider must allow HTTPS and send CORS headers for in-browser playback.`;
-  }
-  if (playbackMode === "hls" && payloadKind !== "hls-manifest" && payloadKind !== "unknown") {
-    return `Cannot play as HLS: ${String(diagnostic.payloadMeaning ?? payloadKind)}`;
-  }
+  if (urlExtension === "m3u8" && payloadKind === "mpegts") return 4;
+  if (urlExtension === "m3u8" && payloadKind !== "hls-manifest" && diagnostic.probeFetch === "ok") return 5;
+  if (urlExtension === "ts" && payloadKind === "hls-manifest") return 6;
+  if (diagnostic.probeFetch === "failed") return 7;
+  if (playbackMode === "hls" && payloadKind !== "hls-manifest" && payloadKind !== "unknown") return 8;
   return null;
 };
 
-const resolveLiveFailureMessage = (
-  reason: string,
+const userMessageFromDiagnostic = (
   diagnostic: Record<string, unknown>,
-  options: {
-    attemptLabel?: string;
-    vlcFallbackUrl: string | null;
-    userMessage?: string;
-  },
+  playbackMode: PlaybackMode,
+): string | null => {
+  const code = diagnosticFailureCode(diagnostic, playbackMode);
+  return code == null ? null : playbackErrorMessage(code);
+};
+
+const resolveLiveFailureMessage = (
+  diagnostic: Record<string, unknown>,
+  options: { userMessage?: string },
 ): string => {
   if (options.userMessage) return options.userMessage;
-
-  const probeMessage = userMessageFromDiagnostic(diagnostic, "hls");
-  if (probeMessage) return probeMessage;
-
-  return options.vlcFallbackUrl
-    ? `Playback failed (${reason}). This stream may work in VLC: ${options.vlcFallbackUrl}`
-    : `Playback failed (${reason}).`;
+  // #9 = generic playback failure with no more specific diagnostic.
+  return userMessageFromDiagnostic(diagnostic, "hls") ?? playbackErrorMessage(9);
 };
 
 /** Fetch first bytes of the resolved playback URL and return a paste-friendly diagnostic object. */
@@ -679,6 +676,10 @@ export const VideoPlayer = ({
       if (playbackStarted) return;
       playbackStarted = true;
       httpFallbackUrl = null;
+      // Real playback has begun — clear any error a slower earlier attempt left
+      // on screen (e.g. a restream that recovered a couple of seconds later).
+      setLocalError(null);
+      onErrorRef.current(null);
       if (testingHttps && currentSchemeHttps) {
         writeHttpsCapability(streamUrl, category, "yes");
         console.info("[IPTV][Player] HTTPS works for this category — cached 'yes'", { category });
@@ -728,11 +729,8 @@ export const VideoPlayer = ({
         const hasDiagnostic = existingDiagnostic && Object.keys(existingDiagnostic).length > 0;
         const diagTarget = typeof extra?.playbackUrl === "string" ? extra.playbackUrl : playbackUrl;
         const diagnostic = hasDiagnostic ? existingDiagnostic : await diagnoseStreamUrl(diagTarget);
-        const attemptLabel = typeof extra?.attemptLabel === "string" ? extra.attemptLabel : undefined;
         const attemptsTried = activeLiveAttempts.slice(0, liveAttemptIndex + 1).map((a) => a.label);
-        const userMessage = resolveLiveFailureMessage(reason, diagnostic, {
-          attemptLabel,
-          vlcFallbackUrl,
+        const userMessage = resolveLiveFailureMessage(diagnostic, {
           userMessage: typeof extra?.userMessage === "string" ? extra.userMessage : undefined,
         });
         logPlaybackReport(
