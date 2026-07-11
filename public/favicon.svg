@@ -1,12 +1,19 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
   <defs>
-    <linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#06b6d4" />
-      <stop offset="100%" stop-color="#2563eb" />
+    <linearGradient id="ctvGrad" x1="0" y1="0" x2="512" y2="512" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#06b6d4" />
+      <stop offset=".52" stop-color="#3b82f6" />
+      <stop offset="1" stop-color="#8b5cf6" />
     </linearGradient>
   </defs>
-  <rect x="4" y="4" width="56" height="56" rx="12" fill="#0f172a" />
-  <path d="M16 23h32v18H16z" fill="url(#g)" />
-  <circle cx="24" cy="50" r="3.5" fill="#94a3b8" />
-  <circle cx="40" cy="50" r="3.5" fill="#94a3b8" />
+  <!-- Brand tile: matches the header's cyan->violet gradient rounded square + white/10 ring -->
+  <rect width="512" height="512" rx="120" fill="url(#ctvGrad)" />
+  <rect x="7" y="7" width="498" height="498" rx="113" fill="none" stroke="#ffffff" stroke-opacity=".14" stroke-width="6" />
+  <!-- lucide "monitor-play" glyph (24-grid), scaled & centered, white stroke -->
+  <g transform="translate(256 256) scale(13) translate(-12 -12)" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="2" y="3" width="20" height="14" rx="2" />
+    <path d="M15.033 9.44a.647.647 0 0 1 0 1.12l-4.065 2.352a.645.645 0 0 1-.968-.56V7.648a.645.645 0 0 1 .967-.56z" />
+    <path d="M12 17v4" />
+    <path d="M8 21h8" />
+  </g>
 </svg>
