@@ -304,6 +304,7 @@ export const SearchOverlay = ({
                   : category === "all" && !debouncedQuery.trim()
                     ? "Type to search across Live TV, Movies, Series, and Catch-up"
                     : `${filteredItems.length.toLocaleString()} result${filteredItems.length === 1 ? "" : "s"}`}
+                <span className="ml-2 text-[10px] text-slate-600">v7</span>
               </span>
             </div>
           </>
@@ -336,7 +337,11 @@ export const SearchOverlay = ({
               <p className="text-sm text-slate-400">No matches for “{debouncedQuery}”</p>
             </div>
           ) : (
-            <ul className="divide-y divide-white/[0.06]">
+            // Key the list by query+filters so a new query REPLACES the list
+            // wholesale. Without this, WKWebView occasionally kept painting rows
+            // from the previous keystroke's query (stale frame) while the count
+            // updated — the "wrong #1 result" bug.
+            <ul key={`${category}::${selectedGroup}::${debouncedQuery}`} className="divide-y divide-white/[0.06]">
               {visibleItems.map((item) => (
                 <li
                   key={item.id}
