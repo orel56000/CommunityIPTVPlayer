@@ -123,8 +123,39 @@ fn build_window(app: &tauri::AppHandle) -> tauri::Result<()> {
         builder = builder.data_directory(dir);
     }
 
-    builder.build()?;
-    Ok(())
+    // macOS (WKWebView) ships with HTML element fullscreen DISABLED, so the
+    // player's `requestFullscreen()` silently rejects — that's why fullscreen
+    // works on Windows (WebView2) but not here. Flip WebKit's `fullScreenEnabled`
+    // preference on the underlying WKWebView so the standard Fullscreen API works.
+    #[cfg(target_os = "macos")]
+    {
+        let window = builder.build()?;
+        let _ = window.with_webview(|webview| {
+            use objc2::msg_send;
+            use objc2::runtime::AnyObject;
+            use objc2_foundation::{NSNumber, NSString};
+            let wk = webview.inner() as *mut AnyObject;
+            if wk.is_null() {
+                return;
+            }
+            // SAFETY: `inner()` hands back the window's live WKWebView; we set a
+            // documented WebKit preference on it via KVC on the main thread.
+            unsafe {
+                let config: *mut AnyObject = msg_send![wk, configuration];
+                let prefs: *mut AnyObject = msg_send![config, preferences];
+                let key = NSString::from_str("fullScreenEnabled");
+                let value = NSNumber::new_bool(true);
+                let _: () = msg_send![prefs, setValue: &*value, forKey: &*key];
+            }
+        });
+        return Ok(());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        builder.build()?;
+        Ok(())
+    }
 }
 
 async fn relay_health_ok() -> bool {
@@ -161,6 +192,26 @@ async fn relay_health_ok() -> bool {
     };
 
     body.get("app").and_then(|value| value.as_str()) == Some("ctv-relay")
+}
+
+/// Ask an already-running CTV relay to exit so THIS (possibly newer) instance
+/// can bind the port and serve its own frontend. Returns true when the old
+/// instance accepted. Older builds without the endpoint return 404 → false,
+/// and we fall back to reusing their relay like before.
+async fn request_takeover() -> bool {
+    if !relay_health_ok().await {
+        return false; // port owner isn't a CTV relay — leave it alone
+    }
+    let Ok(client) = reqwest::Client::builder()
+        .timeout(Duration::from_millis(1500))
+        .build()
+    else {
+        return false;
+    };
+    matches!(
+        client.post(format!("{RELAY_HOST_URL}/api/takeover")).send().await,
+        Ok(resp) if resp.status().is_success()
+    )
 }
 
 async fn wait_for_relay(timeout: Duration) -> bool {
@@ -204,7 +255,22 @@ pub fn run() {
             log::info!("[relay] web_dir: {:?}", web_dir);
             log::info!("[relay] backup_dir: {:?}", backup_dir);
 
-            match bind_relay_listener()? {
+            let mut relay_listener = bind_relay_listener()?;
+            if relay_listener.is_none() {
+                // Port owned by a previous CTV instance (often an OLD build
+                // living in the tray, which would serve its STALE frontend to
+                // our window). Ask it to exit and take the port over.
+                if tauri::async_runtime::block_on(request_takeover()) {
+                    log::info!("[relay] previous instance accepted takeover; rebinding");
+                    let deadline = Instant::now() + Duration::from_secs(4);
+                    while relay_listener.is_none() && Instant::now() < deadline {
+                        std::thread::sleep(Duration::from_millis(120));
+                        relay_listener = bind_relay_listener()?;
+                    }
+                }
+            }
+
+            match relay_listener {
                 Some(std_listener) => {
                     // Bind synchronously, then wait for `/health` before opening
                     // the WebView. This prevents intermittent WebView
@@ -213,7 +279,14 @@ pub fn run() {
                         let listener = tokio::net::TcpListener::from_std(std_listener)
                             .expect("convert std listener to tokio");
                         let router = relay::router(web_dir, ffmpeg, backup_dir);
-                        if let Err(e) = axum::serve(listener, router).await {
+                        // with_connect_info so the takeover endpoint can verify
+                        // the request really comes from loopback.
+                        if let Err(e) = axum::serve(
+                            listener,
+                            router.into_make_service_with_connect_info::<SocketAddr>(),
+                        )
+                        .await
+                        {
                             log::error!("[relay] server error: {e}");
                         }
                     });

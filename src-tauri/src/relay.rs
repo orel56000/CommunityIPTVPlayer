@@ -15,17 +15,17 @@
 
 use axum::{
     body::Body,
-    extract::{Path as AxumPath, Query, State},
-    http::{header, HeaderMap, StatusCode},
+    extract::{ConnectInfo, Path as AxumPath, Query, State},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
     Router,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::net::UdpSocket;
+use std::net::{SocketAddr, UdpSocket};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicI64, AtomicU8, Ordering};
@@ -131,6 +131,11 @@ pub fn router(web_dir: Option<PathBuf>, ffmpeg: PathBuf, backup_dir: Option<Path
 
     let mut app = Router::new()
         .route("/health", get(health))
+        // A newer app instance asks this (older) one to exit so it can bind the
+        // port and serve ITS OWN frontend. Without this, an old instance living
+        // in the tray keeps owning the port after an upgrade and serves its
+        // stale UI to every new window. Loopback-only.
+        .route("/api/takeover", post(takeover))
         .route("/api/server-info", get(server_info))
         .route("/api/stream", get(stream))
         .route("/api/restream/index.m3u8", get(restream_manifest))
@@ -155,7 +160,42 @@ pub fn router(web_dir: Option<PathBuf>, ffmpeg: PathBuf, backup_dir: Option<Path
     // cross-origin, including preflight (OPTIONS) for Range requests. Loopback
     // is exempt from mixed-content blocking, so https://site → http://127.0.0.1
     // is allowed. This handles preflight; handlers no longer set ACAO manually.
-    app.layer(CorsLayer::permissive())
+    //
+    // `no-store` (only where a handler didn't set Cache-Control itself) keeps
+    // the WebView from ever reusing a cached copy of the app shell/assets after
+    // an update — stale JS was the source of "installed the fix but still see
+    // the old behavior".
+    app.layer(CorsLayer::permissive()).layer(
+        tower_http::set_header::SetResponseHeaderLayer::if_not_present(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("no-store"),
+        ),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// /api/takeover — hand the port to a newer app instance
+// ---------------------------------------------------------------------------
+
+async fn takeover(State(state): State<RelayState>, ConnectInfo(peer): ConnectInfo<SocketAddr>) -> Response {
+    if !peer.ip().is_loopback() {
+        return cors_text(StatusCode::FORBIDDEN, "loopback only".to_string());
+    }
+    log::info!("[relay] takeover requested by a new instance — shutting down");
+    // `std::process::exit` skips destructors, so ffmpeg children would be
+    // orphaned; kill the restream sessions explicitly first.
+    {
+        let sessions = state.sessions.lock().await;
+        for session in sessions.values() {
+            let _ = session.child.lock().await.start_kill();
+        }
+    }
+    // Respond first, then exit shortly after so the reply reaches the caller.
+    tokio::spawn(async {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        std::process::exit(0);
+    });
+    StatusCode::NO_CONTENT.into_response()
 }
 
 // ---------------------------------------------------------------------------
