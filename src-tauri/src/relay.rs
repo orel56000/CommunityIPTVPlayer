@@ -64,12 +64,18 @@ pub struct RelayState {
     /// Directory for the durable playlist backup file (a stable on-disk copy of
     /// the user's playlists, independent of the WebView storage profile).
     backup_dir: Option<Arc<PathBuf>>,
+    /// App handle for window control endpoints (None in tests/headless serving).
+    app: Option<tauri::AppHandle>,
 }
 
 impl RelayState {
-    fn new(ffmpeg: PathBuf, backup_dir: Option<PathBuf>) -> Self {
+    fn new(ffmpeg: PathBuf, backup_dir: Option<PathBuf>, app: Option<tauri::AppHandle>) -> Self {
         let http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::limited(5))
+            // Fail fast on dead/stalling upstream servers instead of hanging
+            // the WebView's fetch forever. Connect-only: streams stay open for
+            // hours, so no total/read timeout.
+            .connect_timeout(Duration::from_secs(8))
             .build()
             .expect("failed to build reqwest client");
         Self {
@@ -79,6 +85,7 @@ impl RelayState {
             starting: Arc::new(Mutex::new(HashMap::new())),
             nvenc: Arc::new(AtomicU8::new(0)),
             backup_dir: backup_dir.map(Arc::new),
+            app,
         }
     }
 }
@@ -114,8 +121,13 @@ fn now_ms() -> i64 {
 /// same-origin (mode A: server + UI). Pass `None` for headless mode B.
 /// `ffmpeg` is the path to the ffmpeg binary used for the live restream.
 /// `backup_dir` is where the durable playlist backup file is stored.
-pub fn router(web_dir: Option<PathBuf>, ffmpeg: PathBuf, backup_dir: Option<PathBuf>) -> Router {
-    let state = RelayState::new(ffmpeg, backup_dir);
+pub fn router(
+    web_dir: Option<PathBuf>,
+    ffmpeg: PathBuf,
+    backup_dir: Option<PathBuf>,
+    app: Option<tauri::AppHandle>,
+) -> Router {
+    let state = RelayState::new(ffmpeg, backup_dir, app);
 
     // Spawn the idle-session reaper (mirrors restreamManager's setInterval).
     {
@@ -136,6 +148,10 @@ pub fn router(web_dir: Option<PathBuf>, ffmpeg: PathBuf, backup_dir: Option<Path
         // in the tray keeps owning the port after an upgrade and serves its
         // stale UI to every new window. Loopback-only.
         .route("/api/takeover", post(takeover))
+        // Native window fullscreen for the bundled window. macOS WKWebView
+        // can't use the element Fullscreen API (enabling it breaks video
+        // rendering), so the frontend pairs CSS fullscreen with this.
+        .route("/api/window/fullscreen", post(window_fullscreen))
         .route("/api/server-info", get(server_info))
         .route("/api/stream", get(stream))
         .route("/api/restream/index.m3u8", get(restream_manifest))
@@ -171,6 +187,43 @@ pub fn router(web_dir: Option<PathBuf>, ffmpeg: PathBuf, backup_dir: Option<Path
             HeaderValue::from_static("no-store"),
         ),
     )
+}
+
+// ---------------------------------------------------------------------------
+// /api/window/fullscreen — native window fullscreen for the bundled window
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct FullscreenQuery {
+    /// Desired state; omitted = toggle.
+    on: Option<bool>,
+}
+
+async fn window_fullscreen(
+    State(state): State<RelayState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Query(q): Query<FullscreenQuery>,
+) -> Response {
+    use tauri::Manager;
+    if !peer.ip().is_loopback() {
+        return cors_text(StatusCode::FORBIDDEN, "loopback only".to_string());
+    }
+    let Some(app) = state.app.as_ref() else {
+        return cors_text(StatusCode::SERVICE_UNAVAILABLE, "No app handle".to_string());
+    };
+    let Some(window) = app.get_webview_window("main") else {
+        return cors_text(StatusCode::NOT_FOUND, "No main window".to_string());
+    };
+    let current = window.is_fullscreen().unwrap_or(false);
+    let target = q.on.unwrap_or(!current);
+    if let Err(e) = window.set_fullscreen(target) {
+        return cors_text(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+    }
+    (
+        [(header::CONTENT_TYPE, "application/json")],
+        format!(r#"{{"fullscreen":{target}}}"#),
+    )
+        .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -328,17 +381,66 @@ async fn stream(
         req = req.header(header::RANGE, range);
     }
 
+    // Flight recorder: host + file id only (never the full URL — credentials
+    // live in the path). This is what tells us why a stream failed in the wild.
+    let host = target.host_str().unwrap_or("?").to_string();
+    let file = target
+        .path_segments()
+        .and_then(|s| s.last())
+        .unwrap_or("?")
+        .to_string();
+    let started = std::time::Instant::now();
+
     let upstream = match req.send().await {
         Ok(r) => r,
         Err(e) => {
+            log::warn!(
+                "[stream] FAIL host={host} file={file} after {}ms: {e}",
+                started.elapsed().as_millis()
+            );
             return cors_text(
                 StatusCode::BAD_GATEWAY,
                 format!("Relay could not reach the provider: {e}"),
-            )
+            );
         }
     };
 
     let status = upstream.status();
+    let content_type = upstream
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("-")
+        .to_string();
+    log::info!(
+        "[stream] {} host={host} file={file} type={content_type:?} len={:?} in {}ms",
+        status.as_u16(),
+        upstream
+            .headers()
+            .get(header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("-"),
+        started.elapsed().as_millis()
+    );
+
+    let path_lower = target.path().to_ascii_lowercase();
+    let vod_media = [".mp4", ".mkv", ".avi", ".mov", ".m4v", ".webm", ".mp3", ".aac", ".flac"]
+        .iter()
+        .any(|ext| path_lower.ends_with(ext));
+
+    // XUI-style panels answer a media URL with an HTML block page when the
+    // per-IP connection/rate limit trips. Piping that into <video> yields an
+    // opaque decode error; return a clear, retryable 502 instead.
+    if (vod_media || path_lower.ends_with(".ts")) && content_type.contains("text/html") {
+        log::warn!(
+            "[stream] provider sent HTML for media host={host} file={file} (likely connection/rate limit)"
+        );
+        return cors_text(
+            StatusCode::BAD_GATEWAY,
+            "Provider returned an HTML page instead of video (likely a temporary connection limit). Try again shortly.".to_string(),
+        );
+    }
+
     let mut builder = Response::builder().status(status);
     for name in [
         header::CONTENT_TYPE,
@@ -350,6 +452,14 @@ async fn stream(
         if let Some(v) = upstream.headers().get(&name) {
             builder = builder.header(name, v);
         }
+    }
+    // Let the WebView cache VOD range responses (the global no-store layer only
+    // fills in when a handler sets nothing). Without this, every seek/probe
+    // re-opens a provider connection — rapid bursts trip XUI connection limits
+    // and the panel starts serving HTML block pages instead of video. Live
+    // segments (.ts) and API JSON stay uncached.
+    if vod_media && upstream.headers().get(header::CACHE_CONTROL).is_none() {
+        builder = builder.header(header::CACHE_CONTROL, "private, max-age=3600");
     }
 
     match builder.body(Body::from_stream(upstream.bytes_stream())) {
@@ -406,6 +516,11 @@ async fn restream_manifest(State(state): State<RelayState>, Query(q): Query<UrlQ
             }
         }
     }
+    log::warn!(
+        "[restream] FAIL host={} : {}",
+        target.host_str().unwrap_or("?"),
+        last_err.chars().take(300).collect::<String>()
+    );
     cors_text(StatusCode::BAD_GATEWAY, last_err)
 }
 

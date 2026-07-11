@@ -123,39 +123,14 @@ fn build_window(app: &tauri::AppHandle) -> tauri::Result<()> {
         builder = builder.data_directory(dir);
     }
 
-    // macOS (WKWebView) ships with HTML element fullscreen DISABLED, so the
-    // player's `requestFullscreen()` silently rejects — that's why fullscreen
-    // works on Windows (WebView2) but not here. Flip WebKit's `fullScreenEnabled`
-    // preference on the underlying WKWebView so the standard Fullscreen API works.
-    #[cfg(target_os = "macos")]
-    {
-        let window = builder.build()?;
-        let _ = window.with_webview(|webview| {
-            use objc2::msg_send;
-            use objc2::runtime::AnyObject;
-            use objc2_foundation::{NSNumber, NSString};
-            let wk = webview.inner() as *mut AnyObject;
-            if wk.is_null() {
-                return;
-            }
-            // SAFETY: `inner()` hands back the window's live WKWebView; we set a
-            // documented WebKit preference on it via KVC on the main thread.
-            unsafe {
-                let config: *mut AnyObject = msg_send![wk, configuration];
-                let prefs: *mut AnyObject = msg_send![config, preferences];
-                let key = NSString::from_str("fullScreenEnabled");
-                let value = NSNumber::new_bool(true);
-                let _: () = msg_send![prefs, setValue: &*value, forKey: &*key];
-            }
-        });
-        return Ok(());
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        builder.build()?;
-        Ok(())
-    }
+    // NOTE (macOS): do NOT enable WKWebView's element-fullscreen preference —
+    // neither the legacy KVC key ("fullScreenEnabled") nor the public
+    // elementFullscreenEnabled. Both switch WebKit to a video-compositing path
+    // that renders playback as a black frame with audio only. Fullscreen on
+    // macOS is instead handled by the frontend (CSS fullscreen) plus the
+    // relay's /api/window/fullscreen endpoint (native window fullscreen).
+    builder.build()?;
+    Ok(())
 }
 
 async fn relay_health_ok() -> bool {
@@ -275,10 +250,12 @@ pub fn run() {
                     // Bind synchronously, then wait for `/health` before opening
                     // the WebView. This prevents intermittent WebView
                     // ERR_CONNECTION_REFUSED on production startup.
+                    let relay_app_handle = app.handle().clone();
                     tauri::async_runtime::spawn(async move {
                         let listener = tokio::net::TcpListener::from_std(std_listener)
                             .expect("convert std listener to tokio");
-                        let router = relay::router(web_dir, ffmpeg, backup_dir);
+                        let router =
+                            relay::router(web_dir, ffmpeg, backup_dir, Some(relay_app_handle));
                         // with_connect_info so the takeover endpoint can verify
                         // the request really comes from loopback.
                         if let Err(e) = axum::serve(
