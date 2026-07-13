@@ -28,6 +28,10 @@ export interface PlayerOverlayProps {
   isFullscreen: boolean;
   canPip: boolean;
   canCast: boolean;
+  /** Devices found by the relay's native Cast discovery (null = picker closed). */
+  castDevices?: Array<{ name: string; host: string; port: number }> | null;
+  onPickCastDevice?: (device: { name: string; host: string; port: number }) => void;
+  onCancelCastPicker?: () => void;
   /** Receiver is connected and media is routed to Cast. */
   castActive?: boolean;
   /** Friendly name from Cast device (e.g. Living Room TV). */
@@ -71,6 +75,9 @@ export const PlayerOverlay = ({
   isFullscreen,
   canPip,
   canCast,
+  castDevices = null,
+  onPickCastDevice,
+  onCancelCastPicker,
   castActive = false,
   castDeviceLabel = null,
   castHint = null,
@@ -418,19 +425,45 @@ export const PlayerOverlay = ({
               {downloadBusy ? <Loader2 size={18} className="animate-spin" /> : <Download size={18} />}
             </button>
             {canCast ? (
-              <button
-                type="button"
-                className={clsx("control-btn", castActive && "ring-2 ring-cyan-400/70 ring-offset-2 ring-offset-slate-950")}
-                aria-label={castActive ? "Stop casting" : "Cast to TV"}
-                title={
-                  castActive
-                    ? "Stop casting and play on this browser again"
-                    : "Choose a Chromecast, Google TV, or Android TV device on your Wi‑Fi network"
-                }
-                onClick={onCast}
-              >
-                <Cast size={18} />
-              </button>
+              <div className="relative">
+                <button
+                  type="button"
+                  className={clsx("control-btn", castActive && "ring-2 ring-cyan-400/70 ring-offset-2 ring-offset-slate-950")}
+                  aria-label={castActive ? "Stop casting" : "Cast to TV"}
+                  title={
+                    castActive
+                      ? "Stop casting and play on this browser again"
+                      : "Choose a Chromecast, Google TV, or Android TV device on your Wi‑Fi network"
+                  }
+                  onClick={onCast}
+                >
+                  <Cast size={18} />
+                </button>
+                {castDevices && castDevices.length > 0 ? (
+                  <div className="absolute bottom-full right-0 z-30 mb-2 w-56 rounded-xl border border-white/10 bg-slate-900/95 p-1.5 shadow-2xl shadow-black/60 backdrop-blur">
+                    <p className="px-2.5 pb-1 pt-1 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+                      Cast to
+                    </p>
+                    {castDevices.map((device) => (
+                      <button
+                        key={`${device.host}:${device.port}`}
+                        type="button"
+                        className="block w-full truncate rounded-lg px-2.5 py-2 text-left text-sm text-slate-100 transition hover:bg-white/10"
+                        onClick={() => onPickCastDevice?.(device)}
+                      >
+                        {device.name}
+                      </button>
+                    ))}
+                    <button
+                      type="button"
+                      className="mt-0.5 block w-full rounded-lg px-2.5 py-1.5 text-left text-xs text-slate-500 transition hover:bg-white/10"
+                      onClick={() => onCancelCastPicker?.()}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                ) : null}
+              </div>
             ) : null}
             {canPip ? (
               <button type="button" className="control-btn" aria-label="Picture in picture" onClick={onTogglePip}>

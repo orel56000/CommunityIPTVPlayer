@@ -66,6 +66,8 @@ pub struct RelayState {
     backup_dir: Option<Arc<PathBuf>>,
     /// App handle for window control endpoints (None in tests/headless serving).
     app: Option<tauri::AppHandle>,
+    /// Active native Google Cast session, if any (see cast.rs).
+    cast: Arc<Mutex<Option<crate::cast::CastHandle>>>,
 }
 
 impl RelayState {
@@ -86,6 +88,7 @@ impl RelayState {
             nvenc: Arc::new(AtomicU8::new(0)),
             backup_dir: backup_dir.map(Arc::new),
             app,
+            cast: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -152,6 +155,12 @@ pub fn router(
         // can't use the element Fullscreen API (enabling it breaks video
         // rendering), so the frontend pairs CSS fullscreen with this.
         .route("/api/window/fullscreen", post(window_fullscreen))
+        // Native Google Cast (chrome.cast doesn't exist in WKWebView) —
+        // discovery, session start, transport commands, and status polling.
+        .route("/api/cast/devices", get(cast_devices))
+        .route("/api/cast/start", post(cast_start))
+        .route("/api/cast/cmd", post(cast_cmd))
+        .route("/api/cast/status", get(cast_status))
         .route("/api/server-info", get(server_info))
         .route("/api/stream", get(stream))
         .route("/api/restream/index.m3u8", get(restream_manifest))
@@ -224,6 +233,135 @@ async fn window_fullscreen(
         format!(r#"{{"fullscreen":{target}}}"#),
     )
         .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// /api/cast/* — native Google Cast (discovery, session, transport, status)
+// ---------------------------------------------------------------------------
+
+async fn cast_devices(ConnectInfo(peer): ConnectInfo<SocketAddr>) -> Response {
+    if !peer.ip().is_loopback() {
+        return cors_text(StatusCode::FORBIDDEN, "loopback only".to_string());
+    }
+    let devices = tokio::task::spawn_blocking(|| {
+        crate::cast::discover(Duration::from_millis(2500))
+    })
+    .await
+    .unwrap_or_default();
+    log::info!("[cast] discovery found {} device(s)", devices.len());
+    (
+        [(header::CONTENT_TYPE, "application/json")],
+        serde_json::to_string(&devices).unwrap_or_else(|_| "[]".to_string()),
+    )
+        .into_response()
+}
+
+#[derive(Deserialize)]
+struct CastStartBody {
+    host: String,
+    port: Option<u16>,
+    name: Option<String>,
+    url: String,
+    content_type: String,
+    title: Option<String>,
+    live: Option<bool>,
+}
+
+async fn cast_start(
+    State(state): State<RelayState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    axum::Json(body): axum::Json<CastStartBody>,
+) -> Response {
+    if !peer.ip().is_loopback() {
+        return cors_text(StatusCode::FORBIDDEN, "loopback only".to_string());
+    }
+    let live = body.live.unwrap_or(false);
+    let make_load = || crate::cast::CastCmd::Load {
+        url: body.url.clone(),
+        content_type: body.content_type.clone(),
+        title: body.title.clone(),
+        live,
+    };
+
+    let mut guard = state.cast.lock().await;
+    // Reuse a live session to the same device (item switch while casting).
+    if let Some(handle) = guard.as_ref() {
+        let (active, same_host) = {
+            let snap = handle.snapshot.lock().unwrap();
+            (snap.active, snap.host == body.host)
+        };
+        if active && same_host && handle.tx.send(make_load()).is_ok() {
+            return StatusCode::NO_CONTENT.into_response();
+        }
+        // Fall through: replacing the handle drops its sender, which makes the
+        // old worker stop the device app and exit.
+    }
+
+    let handle = crate::cast::start_session(
+        body.host.clone(),
+        body.port.unwrap_or(8009),
+        body.name.clone().unwrap_or_else(|| "Chromecast".to_string()),
+    );
+    let _ = handle.tx.send(make_load());
+    *guard = Some(handle);
+    StatusCode::NO_CONTENT.into_response()
+}
+
+#[derive(Deserialize)]
+struct CastCmdQuery {
+    op: String,
+    t: Option<f32>,
+    level: Option<f32>,
+    muted: Option<bool>,
+}
+
+async fn cast_cmd(
+    State(state): State<RelayState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Query(q): Query<CastCmdQuery>,
+) -> Response {
+    if !peer.ip().is_loopback() {
+        return cors_text(StatusCode::FORBIDDEN, "loopback only".to_string());
+    }
+    let mut guard = state.cast.lock().await;
+    let Some(handle) = guard.as_ref() else {
+        return cors_text(StatusCode::NOT_FOUND, "No cast session".to_string());
+    };
+    let cmd = match q.op.as_str() {
+        "play" => crate::cast::CastCmd::Play,
+        "pause" => crate::cast::CastCmd::Pause,
+        "seek" => crate::cast::CastCmd::Seek(q.t.unwrap_or(0.0)),
+        "volume" => crate::cast::CastCmd::Volume(q.level.unwrap_or(1.0)),
+        "mute" => crate::cast::CastCmd::Mute(q.muted.unwrap_or(true)),
+        "stop" => {
+            let _ = handle.tx.send(crate::cast::CastCmd::Disconnect);
+            *guard = None;
+            return StatusCode::NO_CONTENT.into_response();
+        }
+        _ => return cors_text(StatusCode::BAD_REQUEST, "Unknown op".to_string()),
+    };
+    let _ = handle.tx.send(cmd);
+    StatusCode::NO_CONTENT.into_response()
+}
+
+async fn cast_status(
+    State(state): State<RelayState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+) -> Response {
+    if !peer.ip().is_loopback() {
+        return cors_text(StatusCode::FORBIDDEN, "loopback only".to_string());
+    }
+    let snapshot = state
+        .cast
+        .lock()
+        .await
+        .as_ref()
+        .map(|handle| handle.snapshot.lock().unwrap().clone());
+    let body = match snapshot {
+        Some(snap) => serde_json::to_string(&snap).unwrap_or_else(|_| "{}".to_string()),
+        None => r#"{"active":false}"#.to_string(),
+    };
+    ([(header::CONTENT_TYPE, "application/json")], body).into_response()
 }
 
 // ---------------------------------------------------------------------------

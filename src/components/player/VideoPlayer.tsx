@@ -415,6 +415,9 @@ export const VideoPlayer = ({
     castSetVolumeLevel,
     castMuteToggle,
     canCast,
+    castDevices,
+    castToDevice,
+    cancelCastPicker,
   } = useChromecast(item, onCastProgress);
 
   useEffect(() => {
@@ -1546,6 +1549,9 @@ export const VideoPlayer = ({
           isFullscreen={isFullscreen || cssFullscreen}
           canPip={canPip}
           canCast={canCast}
+          castDevices={castDevices}
+          onPickCastDevice={(device) => void castToDevice(device)}
+          onCancelCastPicker={cancelCastPicker}
           castActive={isCasting}
           castDeviceLabel={deviceName}
           castHint={castMessage}

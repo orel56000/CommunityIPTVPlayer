@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { PlaylistItem } from "../types/models";
+import { getRelayBase } from "../utils/secureUrl";
+import { toXtreamTsUrl } from "../utils/xtreamStreamUrl";
 
 const DEFAULT_RECEIVER = "CC1AD845";
 const FALLBACK_CAST_STATE = {
@@ -58,9 +60,63 @@ const emptyMirror: CastMirrorState = {
   isMediaLoaded: false,
 };
 
+// ---------------------------------------------------------------------------
+// Relay-native cast backend (macOS WKWebView has no chrome.cast; the app's
+// relay speaks the Cast protocol itself — see src-tauri/src/cast.rs).
+// ---------------------------------------------------------------------------
+
+export interface RelayCastDevice {
+  name: string;
+  host: string;
+  port: number;
+}
+
+interface RelayCastSnapshot {
+  active: boolean;
+  device_name?: string;
+  host?: string;
+  player_state?: string;
+  current_time?: number;
+  duration?: number;
+  muted?: boolean;
+  error?: string | null;
+}
+
+const relayApi = (path: string): string => `${getRelayBase()}${path}`;
+
+const relayCastStatus = async (): Promise<RelayCastSnapshot | null> => {
+  try {
+    const res = await fetch(relayApi("/api/cast/status"), { cache: "no-store" });
+    if (!res.ok) return null;
+    return (await res.json()) as RelayCastSnapshot;
+  } catch {
+    return null;
+  }
+};
+
+/** Media the Cast device should fetch. VOD goes straight to the provider (the
+ * device shares the home IP, and mp4 playback needs no CORS); live TV uses the
+ * relay's ffmpeg HLS restream on the LAN address. */
+const buildRelayCastMedia = (
+  item: PlaylistItem,
+  lanOrigin: string | null,
+): { url: string; content_type: string; live: boolean } | null => {
+  if (item.section === "live") {
+    if (!lanOrigin) return null;
+    const ts = toXtreamTsUrl(item.streamUrl) ?? item.streamUrl;
+    return {
+      url: `${lanOrigin}/api/restream/index.m3u8?url=${encodeURIComponent(ts)}`,
+      content_type: "application/x-mpegURL",
+      live: true,
+    };
+  }
+  return { url: item.streamUrl, content_type: contentTypeForUrl(item.streamUrl), live: false };
+};
+
 /**
- * Chromecast Web Sender (CAF): device picker + default media receiver,
- * RemotePlayer for pause/seek/volume from the browser.
+ * Chromecast support with two backends behind one interface:
+ * - Google Cast Web Sender (CAF) where `chrome.cast` exists (Chrome, WebView2).
+ * - The app relay's native Cast implementation everywhere else (WKWebView).
  */
 export const useChromecast = (
   item: PlaylistItem | null,
@@ -86,6 +142,15 @@ export const useChromecast = (
   const [castMessage, setCastMessage] = useState<string | null>(null);
   const clearCastMessage = useCallback(() => setCastMessage(null), []);
 
+  // Relay backend state
+  const [relayCastAvailable, setRelayCastAvailable] = useState(false);
+  const [relayCasting, setRelayCasting] = useState(false);
+  const [castDevices, setCastDevices] = useState<RelayCastDevice[] | null>(null);
+  const [pickerBusy, setPickerBusy] = useState(false);
+  const lanOriginRef = useRef<string | null>(null);
+  const lastDeviceRef = useRef<RelayCastDevice | null>(null);
+  const relayMutedRef = useRef(false);
+
   const remotePlayerRef = useRef<cast.framework.RemotePlayer | null>(null);
   const remoteControllerRef = useRef<cast.framework.RemotePlayerController | null>(null);
   const mirrorHandlerRef = useRef<(() => void) | null>(null);
@@ -98,6 +163,7 @@ export const useChromecast = (
     setDeviceName(session?.getCastDevice()?.friendlyName ?? null);
   }, []);
 
+  // Google SDK arming (no-op where chrome.cast can't exist).
   useEffect(() => {
     if (typeof window === "undefined") return;
 
@@ -138,6 +204,33 @@ export const useChromecast = (
 
     return () => window.clearInterval(id);
   }, [refreshCastContext]);
+
+  // Relay backend probe: the endpoint answers only from the local relay, and
+  // we also learn the LAN origin the Cast device must use for restreams.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const status = await relayCastStatus();
+      if (cancelled || !status) return;
+      setRelayCastAvailable(true);
+      if (status.active) setRelayCasting(true);
+      try {
+        const res = await fetch(relayApi("/api/server-info"), { cache: "no-store" });
+        if (res.ok) {
+          const info = (await res.json()) as { origins?: string[] };
+          const lan = info.origins?.find(
+            (origin) => !origin.includes("127.0.0.1") && !origin.includes("localhost"),
+          );
+          if (!cancelled) lanOriginRef.current = lan ?? info.origins?.[0] ?? null;
+        }
+      } catch {
+        /* keep null; live-TV casting will report it */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     if (!sdkReady) return;
@@ -208,89 +301,238 @@ export const useChromecast = (
     return () => detachRemotePlayer();
   }, [sdkReady, castState, attachRemotePlayer, detachRemotePlayer]);
 
-  const isCasting = castState === getCastStates().CONNECTED;
+  const googleCasting = sdkReady && castState === getCastStates().CONNECTED;
+  const isCasting = googleCasting || relayCasting;
 
+  // Relay backend: poll the session status while casting.
   useEffect(() => {
-    if (!sdkReady || !isCasting) return;
-    const current = itemRef.current;
-    const session = getCastContext()?.getCurrentSession();
-    if (!session || !current) return;
-    let cancelled = false;
-    void (async () => {
+    if (!relayCasting) return;
+    const id = window.setInterval(() => {
+      void (async () => {
+        const status = await relayCastStatus();
+        if (!status || !status.active) {
+          setRelayCasting(false);
+          setMirror(emptyMirror);
+          setDeviceName(null);
+          if (status?.error) setCastMessage(`Cast: ${status.error}`);
+          return;
+        }
+        setDeviceName(status.device_name ?? null);
+        relayMutedRef.current = Boolean(status.muted);
+        const state = status.player_state ?? "";
+        const loaded = state === "PLAYING" || state === "PAUSED" || state === "BUFFERING";
+        const currentTime = status.current_time ?? 0;
+        const duration = status.duration ?? 0;
+        setMirror({
+          currentTime,
+          duration,
+          isPaused: state === "PAUSED",
+          isMediaLoaded: loaded,
+        });
+        if (loaded && duration > 0) onRemoteProgressRef.current?.(currentTime, duration);
+      })();
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, [relayCasting]);
+
+  const relayCastCmd = useCallback((params: string) => {
+    void fetch(relayApi(`/api/cast/cmd?${params}`), { method: "POST" }).catch(() => undefined);
+  }, []);
+
+  const relayCastLoad = useCallback(
+    async (device: RelayCastDevice, current: PlaylistItem): Promise<boolean> => {
+      const media = buildRelayCastMedia(current, lanOriginRef.current);
+      if (!media) {
+        setCastMessage("Cast: could not determine a LAN address for live TV casting.");
+        return false;
+      }
+      try {
+        const res = await fetch(relayApi("/api/cast/start"), {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            host: device.host,
+            port: device.port,
+            name: device.name,
+            title: current.title,
+            ...media,
+          }),
+        });
+        if (!res.ok) {
+          setCastMessage(`Cast: start failed (${res.status}).`);
+          return false;
+        }
+        return true;
+      } catch {
+        setCastMessage("Cast: could not reach the app backend.");
+        return false;
+      }
+    },
+    [],
+  );
+
+  const castToDevice = useCallback(
+    async (device: RelayCastDevice) => {
+      const current = itemRef.current;
+      setCastDevices(null);
+      if (!current) return;
       setCastMessage(null);
-      const err = await loadMediaOnSession(session, current);
-      if (cancelled) return;
-      if (err) setCastMessage(`Cast: could not load this stream (${err}).`);
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [sdkReady, isCasting, item?.id]);
+      lastDeviceRef.current = device;
+      if (await relayCastLoad(device, current)) {
+        setDeviceName(device.name);
+        setRelayCasting(true);
+      }
+    },
+    [relayCastLoad],
+  );
+
+  const cancelCastPicker = useCallback(() => setCastDevices(null), []);
+
+  // Load the new item on the active session when the user switches content.
+  useEffect(() => {
+    if (!isCasting) return;
+    const current = itemRef.current;
+    if (!current) return;
+
+    if (googleCasting) {
+      const session = getCastContext()?.getCurrentSession();
+      if (!session) return;
+      let cancelled = false;
+      void (async () => {
+        setCastMessage(null);
+        const err = await loadMediaOnSession(session, current);
+        if (cancelled) return;
+        if (err) setCastMessage(`Cast: could not load this stream (${err}).`);
+      })();
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    const device = lastDeviceRef.current;
+    if (device) void relayCastLoad(device, current);
+  }, [isCasting, googleCasting, item?.id, relayCastLoad]);
 
   const requestCastSession = useCallback(async () => {
     const current = itemRef.current;
-    if (!sdkReady || !current) return;
+    if (!current) return;
     setCastMessage(null);
-    const ctx = getCastContext();
-    if (!ctx) {
-      setCastMessage("Cast is not available in this browser yet.");
+
+    // Google backend (Chrome / WebView2): the browser shows its own picker.
+    if (sdkReady) {
+      const ctx = getCastContext();
+      if (!ctx) {
+        setCastMessage("Cast is not available in this browser yet.");
+        return;
+      }
+      try {
+        const err = await ctx.requestSession();
+        if (err) {
+          setCastMessage("Cast was cancelled or no device was selected.");
+          return;
+        }
+        const session = ctx.getCurrentSession();
+        if (!session) {
+          setCastMessage("No Cast session.");
+          return;
+        }
+        setDeviceName(session.getCastDevice()?.friendlyName ?? null);
+      } catch {
+        setCastMessage("Cast failed. Check that a Cast device is on your network.");
+      }
       return;
     }
+
+    // Relay backend: discover devices and show our own picker.
+    if (!relayCastAvailable || pickerBusy) return;
+    setPickerBusy(true);
+    setCastMessage("Looking for Cast devices…");
     try {
-      const err = await ctx.requestSession();
-      if (err) {
-        setCastMessage("Cast was cancelled or no device was selected.");
-        return;
+      const res = await fetch(relayApi("/api/cast/devices"), { cache: "no-store" });
+      const devices = res.ok ? ((await res.json()) as RelayCastDevice[]) : [];
+      setCastMessage(null);
+      if (!devices.length) {
+        setCastMessage("No Cast devices found on your network.");
+      } else if (devices.length === 1) {
+        await castToDevice(devices[0]);
+      } else {
+        setCastDevices(devices);
       }
-      const session = ctx.getCurrentSession();
-      if (!session) {
-        setCastMessage("No Cast session.");
-        return;
-      }
-      setDeviceName(session.getCastDevice()?.friendlyName ?? null);
     } catch {
-      setCastMessage("Cast failed. Use Chrome on desktop, or check that a Cast device is on your network.");
+      setCastMessage("Cast device discovery failed.");
+    } finally {
+      setPickerBusy(false);
     }
-  }, [sdkReady]);
+  }, [sdkReady, relayCastAvailable, pickerBusy, castToDevice]);
 
   const stopCasting = useCallback(() => {
-    if (!sdkReady) return;
-    getCastContext()?.endCurrentSession(true);
+    if (googleCasting) {
+      getCastContext()?.endCurrentSession(true);
+    }
+    if (relayCasting) {
+      relayCastCmd("op=stop");
+      setRelayCasting(false);
+      setMirror(emptyMirror);
+    }
     setCastMessage(null);
     setDeviceName(null);
-  }, [sdkReady]);
+  }, [googleCasting, relayCasting, relayCastCmd]);
 
   const castPlayPause = useCallback(() => {
+    if (relayCasting) {
+      relayCastCmd(mirror.isPaused ? "op=play" : "op=pause");
+      return;
+    }
     remoteControllerRef.current?.playOrPause();
-  }, []);
+  }, [relayCasting, relayCastCmd, mirror.isPaused]);
 
-  const castSeekTo = useCallback((seconds: number) => {
-    const rp = remotePlayerRef.current;
-    const rpc = remoteControllerRef.current;
-    if (!rp || !rpc) return;
-    const dur = rp.duration;
-    const clamped =
-      Number.isFinite(dur) && dur > 0 ? Math.min(Math.max(0, seconds), dur) : Math.max(0, seconds);
-    rp.currentTime = clamped;
-    rpc.seek();
-  }, []);
+  const castSeekTo = useCallback(
+    (seconds: number) => {
+      if (relayCasting) {
+        const clamped = mirror.duration > 0 ? Math.min(Math.max(0, seconds), mirror.duration) : Math.max(0, seconds);
+        relayCastCmd(`op=seek&t=${clamped.toFixed(2)}`);
+        return;
+      }
+      const rp = remotePlayerRef.current;
+      const rpc = remoteControllerRef.current;
+      if (!rp || !rpc) return;
+      const dur = rp.duration;
+      const clamped =
+        Number.isFinite(dur) && dur > 0 ? Math.min(Math.max(0, seconds), dur) : Math.max(0, seconds);
+      rp.currentTime = clamped;
+      rpc.seek();
+    },
+    [relayCasting, relayCastCmd, mirror.duration],
+  );
 
-  const castSetVolumeLevel = useCallback((level: number) => {
-    const rp = remotePlayerRef.current;
-    const rpc = remoteControllerRef.current;
-    if (!rp || !rpc || !rp.canControlVolume) return;
-    rp.volumeLevel = Math.min(1, Math.max(0, level));
-    rpc.setVolumeLevel();
-  }, []);
+  const castSetVolumeLevel = useCallback(
+    (level: number) => {
+      if (relayCasting) {
+        relayCastCmd(`op=volume&level=${Math.min(1, Math.max(0, level)).toFixed(3)}`);
+        return;
+      }
+      const rp = remotePlayerRef.current;
+      const rpc = remoteControllerRef.current;
+      if (!rp || !rpc || !rp.canControlVolume) return;
+      rp.volumeLevel = Math.min(1, Math.max(0, level));
+      rpc.setVolumeLevel();
+    },
+    [relayCasting, relayCastCmd],
+  );
 
   const castMuteToggle = useCallback(() => {
+    if (relayCasting) {
+      relayCastCmd(`op=mute&muted=${relayMutedRef.current ? "false" : "true"}`);
+      return;
+    }
     remoteControllerRef.current?.muteOrUnmute();
-  }, []);
+  }, [relayCasting, relayCastCmd]);
 
-  const canCast =
+  const googleCanCast =
     typeof chrome !== "undefined" &&
     sdkReady &&
-    (isCasting || castState !== getCastStates().NO_DEVICES_AVAILABLE);
+    (googleCasting || castState !== getCastStates().NO_DEVICES_AVAILABLE);
+  const canCast = googleCanCast || relayCastAvailable;
 
   return {
     sdkReady,
@@ -299,6 +541,9 @@ export const useChromecast = (
     mirror,
     deviceName,
     castMessage,
+    castDevices,
+    castToDevice,
+    cancelCastPicker,
     requestCastSession,
     stopCasting,
     castPlayPause,
