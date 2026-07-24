@@ -21,14 +21,27 @@ tauri-build = { version = "2.4.1", features = [] }
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
-tauri = { version = "2.11.2", features = ["tray-icon"] }
+tauri = { version = "2.11.2", features = [] }
 tauri-plugin-log = "2"
 
 # Local HTTP relay (axum + reqwest + tokio) — see src/relay.rs
 axum = "0.7"
-reqwest = { version = "0.12", features = ["stream"] }
+# Use rustls (not native-tls/OpenSSL) so the relay cross-compiles to Android/iOS
+# without an OpenSSL toolchain. rustls works the same on desktop.
+reqwest = { version = "0.12", default-features = false, features = [
+    "stream",
+    "rustls-tls",
+    "http2",
+    "charset",
+] }
 tokio = { version = "1", features = ["full"] }
 url = "2"
 tower-http = { version = "0.5", features = ["fs", "cors", "set-header"] }
+
+# Desktop-only dependencies. The system tray, and native Google Cast (rust_cast
+# pulls OpenSSL; mDNS discovery is desktop-oriented) are excluded from the
+# Android/iOS builds, which have no OpenSSL toolchain and their own cast stack.
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri = { version = "2.11.2", features = ["tray-icon"] }
 rust_cast = "0.21"
 mdns-sd = "0.20"

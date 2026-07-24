@@ -10,7 +10,10 @@
     "lint": "eslint .",
     "tauri": "tauri",
     "tauri:sidecars": "node scripts/prepare-tauri-sidecars.mjs",
-    "tauri:build": "npm run tauri:sidecars && tauri build"
+    "tauri:build": "npm run tauri:sidecars && tauri build",
+    "android:ffmpeg": "bash scripts/build-ffmpeg-android.sh",
+    "android:dev": "tauri android dev",
+    "android:build": "tauri android build --apk"
   },
   "keywords": [
     "iptv",

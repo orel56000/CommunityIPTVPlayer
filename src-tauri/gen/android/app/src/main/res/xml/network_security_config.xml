@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The app is a self-contained IPTV player: its UI (WebView) talks to an
+  in-process HTTP relay on http://127.0.0.1:11471, and IPTV providers are very
+  often plain HTTP. Cleartext must therefore be permitted (this also applies to
+  release builds, where Android would otherwise block cleartext by default).
+-->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">127.0.0.1</domain>
+        <domain includeSubdomains="true">localhost</domain>
+    </domain-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

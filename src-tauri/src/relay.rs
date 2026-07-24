@@ -64,14 +64,20 @@ pub struct RelayState {
     /// Directory for the durable playlist backup file (a stable on-disk copy of
     /// the user's playlists, independent of the WebView storage profile).
     backup_dir: Option<Arc<PathBuf>>,
-    /// App handle for window control endpoints (None in tests/headless serving).
+    /// App handle for the desktop window-control endpoint (None in tests).
+    #[cfg(desktop)]
     app: Option<tauri::AppHandle>,
-    /// Active native Google Cast session, if any (see cast.rs).
+    /// Active native Google Cast session, if any (see cast.rs). Desktop only —
+    /// mobile has no native Cast relay.
+    #[cfg(desktop)]
     cast: Arc<Mutex<Option<crate::cast::CastHandle>>>,
 }
 
 impl RelayState {
     fn new(ffmpeg: PathBuf, backup_dir: Option<PathBuf>, app: Option<tauri::AppHandle>) -> Self {
+        // `app` only feeds the desktop-only window-fullscreen endpoint.
+        #[cfg(not(desktop))]
+        let _ = &app;
         let http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::limited(5))
             // Fail fast on dead/stalling upstream servers instead of hanging
@@ -87,7 +93,9 @@ impl RelayState {
             starting: Arc::new(Mutex::new(HashMap::new())),
             nvenc: Arc::new(AtomicU8::new(0)),
             backup_dir: backup_dir.map(Arc::new),
+            #[cfg(desktop)]
             app,
+            #[cfg(desktop)]
             cast: Arc::new(Mutex::new(None)),
         }
     }
@@ -144,23 +152,13 @@ pub fn router(
         });
     }
 
-    let mut app = Router::new()
+    let app = Router::new()
         .route("/health", get(health))
         // A newer app instance asks this (older) one to exit so it can bind the
         // port and serve ITS OWN frontend. Without this, an old instance living
         // in the tray keeps owning the port after an upgrade and serves its
         // stale UI to every new window. Loopback-only.
         .route("/api/takeover", post(takeover))
-        // Native window fullscreen for the bundled window. macOS WKWebView
-        // can't use the element Fullscreen API (enabling it breaks video
-        // rendering), so the frontend pairs CSS fullscreen with this.
-        .route("/api/window/fullscreen", post(window_fullscreen))
-        // Native Google Cast (chrome.cast doesn't exist in WKWebView) —
-        // discovery, session start, transport commands, and status polling.
-        .route("/api/cast/devices", get(cast_devices))
-        .route("/api/cast/start", post(cast_start))
-        .route("/api/cast/cmd", post(cast_cmd))
-        .route("/api/cast/status", get(cast_status))
         .route("/api/server-info", get(server_info))
         .route("/api/stream", get(stream))
         .route("/api/restream/index.m3u8", get(restream_manifest))
@@ -172,14 +170,30 @@ pub fn router(
             get(backup_get)
                 .put(backup_put)
                 .route_layer(axum::extract::DefaultBodyLimit::max(256 * 1024 * 1024)),
-        )
-        .with_state(state);
+        );
 
-    if let Some(dir) = web_dir {
+    // Desktop-only endpoints. Native window fullscreen (macOS WKWebView can't use
+    // the element Fullscreen API — enabling it breaks video rendering, so the
+    // frontend pairs CSS fullscreen with this) and native Google Cast
+    // (chrome.cast doesn't exist in WKWebView): discovery, session, transport,
+    // status. Mobile has neither.
+    #[cfg(desktop)]
+    let app = app
+        .route("/api/window/fullscreen", post(window_fullscreen))
+        .route("/api/cast/devices", get(cast_devices))
+        .route("/api/cast/start", post(cast_start))
+        .route("/api/cast/cmd", post(cast_cmd))
+        .route("/api/cast/status", get(cast_status));
+
+    let app = app.with_state(state);
+
+    let app = if let Some(dir) = web_dir {
         // Serve the SPA; unknown paths fall back to index.html for client routing.
         let index = dir.join("index.html");
-        app = app.fallback_service(ServeDir::new(dir).fallback(ServeFile::new(index)));
-    }
+        app.fallback_service(ServeDir::new(dir).fallback(ServeFile::new(index)))
+    } else {
+        app
+    };
 
     // Permissive CORS so the deployed HTTPS site can call this loopback relay
     // cross-origin, including preflight (OPTIONS) for Range requests. Loopback
@@ -202,12 +216,14 @@ pub fn router(
 // /api/window/fullscreen — native window fullscreen for the bundled window
 // ---------------------------------------------------------------------------
 
+#[cfg(desktop)]
 #[derive(Deserialize)]
 struct FullscreenQuery {
     /// Desired state; omitted = toggle.
     on: Option<bool>,
 }
 
+#[cfg(desktop)]
 async fn window_fullscreen(
     State(state): State<RelayState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -239,6 +255,7 @@ async fn window_fullscreen(
 // /api/cast/* — native Google Cast (discovery, session, transport, status)
 // ---------------------------------------------------------------------------
 
+#[cfg(desktop)]
 async fn cast_devices(ConnectInfo(peer): ConnectInfo<SocketAddr>) -> Response {
     if !peer.ip().is_loopback() {
         return cors_text(StatusCode::FORBIDDEN, "loopback only".to_string());
@@ -256,6 +273,7 @@ async fn cast_devices(ConnectInfo(peer): ConnectInfo<SocketAddr>) -> Response {
         .into_response()
 }
 
+#[cfg(desktop)]
 #[derive(Deserialize)]
 struct CastStartBody {
     host: String,
@@ -267,6 +285,7 @@ struct CastStartBody {
     live: Option<bool>,
 }
 
+#[cfg(desktop)]
 async fn cast_start(
     State(state): State<RelayState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -307,6 +326,7 @@ async fn cast_start(
     StatusCode::NO_CONTENT.into_response()
 }
 
+#[cfg(desktop)]
 #[derive(Deserialize)]
 struct CastCmdQuery {
     op: String,
@@ -315,6 +335,7 @@ struct CastCmdQuery {
     muted: Option<bool>,
 }
 
+#[cfg(desktop)]
 async fn cast_cmd(
     State(state): State<RelayState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -344,6 +365,7 @@ async fn cast_cmd(
     StatusCode::NO_CONTENT.into_response()
 }
 
+#[cfg(desktop)]
 async fn cast_status(
     State(state): State<RelayState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,

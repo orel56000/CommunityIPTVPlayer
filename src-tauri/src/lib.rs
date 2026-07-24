@@ -1,3 +1,4 @@
+#[cfg(desktop)]
 mod cast;
 mod relay;
 
@@ -5,10 +6,15 @@ use std::net::{SocketAddr, TcpListener};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use tauri::Manager;
+// Tray + window building are desktop-only. On mobile Tauri creates the window
+// from the platform config, and the `tray` module doesn't exist (no tray-icon
+// feature), so these imports must not be compiled there.
+#[cfg(desktop)]
 use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
-    Manager, WebviewUrl, WebviewWindowBuilder,
+    WebviewUrl, WebviewWindowBuilder,
 };
 
 /// Fixed default port; clients (the bundled window AND the deployed Vercel site)
@@ -17,6 +23,8 @@ const RELAY_PORT: u16 = 11471;
 const RELAY_HOST_URL: &str = "http://127.0.0.1:11471";
 
 /// True when launched headless (server/tray only, no window) — mode B.
+/// Desktop only; mobile always shows its window.
+#[cfg(desktop)]
 fn is_headless() -> bool {
     std::env::var("CTV_HEADLESS")
         .map(|v| v == "1")
@@ -57,7 +65,9 @@ fn resolve_ffmpeg() -> PathBuf {
 ///
 /// Checks every layout the bundle can take, because the installed app and the
 /// dev run resolve `dist` differently and the Tauri resource bundler has a `../`
-/// quirk. Whichever exists wins.
+/// quirk. Whichever exists wins. Desktop only — mobile loads the bundled UI via
+/// the asset protocol instead of serving it from the relay.
+#[cfg(desktop)]
 fn resolve_web_dir(app: &tauri::App) -> Option<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
 
@@ -95,10 +105,12 @@ fn resolve_web_dir(app: &tauri::App) -> Option<PathBuf> {
 /// (the user's saved playlists) aren't reset on rebuild/reinstall. WebView2
 /// creates its own `EBWebView` subfolder here, so we pass the parent (the same
 /// path Tauri uses by default) — NOT joined with `EBWebView`, which would nest.
+#[cfg(desktop)]
 fn webview_data_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
     app.path().app_local_data_dir().ok()
 }
 
+#[cfg(desktop)]
 fn build_window(app: &tauri::AppHandle) -> tauri::Result<()> {
     let mut builder = WebviewWindowBuilder::new(
         app,
@@ -222,7 +234,14 @@ pub fn run() {
                 .build(),
         )
         .setup(|app| {
+            // Desktop serves the built UI from the relay (mode A: window loads
+            // http://127.0.0.1:PORT). Mobile loads the bundled UI via Tauri's
+            // asset protocol and only calls the relay for /api/*, so it needs no
+            // on-disk web_dir and never runs ServeDir.
+            #[cfg(desktop)]
             let web_dir = resolve_web_dir(app);
+            #[cfg(not(desktop))]
+            let web_dir: Option<PathBuf> = None;
             let ffmpeg = resolve_ffmpeg();
             // Durable playlist backup lives in the app's local data dir — a stable
             // location that outlives the WebView storage profile.
@@ -289,32 +308,38 @@ pub fn run() {
                 }
             }
 
-            // Tray icon (both modes) — gives headless mode a UI handle.
-            let show = MenuItem::with_id(app, "show", "Open Player", true, None::<&str>)?;
-            let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show, &quit])?;
-            let _tray = TrayIconBuilder::new()
-                .icon(app.default_window_icon().unwrap().clone())
-                .menu(&menu)
-                .tooltip("Community IPTV Player")
-                .on_menu_event(|app, event| match event.id.as_ref() {
-                    "show" => {
-                        if let Some(w) = app.get_webview_window("main") {
-                            let _ = w.show();
-                            let _ = w.set_focus();
-                        } else {
-                            let _ = build_window(app);
+            // Desktop: a system tray (also the UI handle for headless mode) plus
+            // the app window, built here so it opens only after the relay is
+            // healthy. On mobile there is no tray, and Tauri creates the window
+            // from the platform config (tauri.android.conf.json).
+            #[cfg(desktop)]
+            {
+                let show = MenuItem::with_id(app, "show", "Open Player", true, None::<&str>)?;
+                let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+                let menu = Menu::with_items(app, &[&show, &quit])?;
+                let _tray = TrayIconBuilder::new()
+                    .icon(app.default_window_icon().unwrap().clone())
+                    .menu(&menu)
+                    .tooltip("Community IPTV Player")
+                    .on_menu_event(|app, event| match event.id.as_ref() {
+                        "show" => {
+                            if let Some(w) = app.get_webview_window("main") {
+                                let _ = w.show();
+                                let _ = w.set_focus();
+                            } else {
+                                let _ = build_window(app);
+                            }
                         }
-                    }
-                    "quit" => app.exit(0),
-                    _ => {}
-                })
-                .build(app)?;
+                        "quit" => app.exit(0),
+                        _ => {}
+                    })
+                    .build(app)?;
 
-            if !is_headless() {
-                build_window(&app.handle())?;
-            } else {
-                log::info!("[relay] headless mode — relay only, no window");
+                if !is_headless() {
+                    build_window(&app.handle())?;
+                } else {
+                    log::info!("[relay] headless mode — relay only, no window");
+                }
             }
 
             Ok(())
