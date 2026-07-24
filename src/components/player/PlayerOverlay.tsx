@@ -12,9 +12,11 @@ import {
   RotateCcw,
   RotateCw,
   Settings,
+  SkipForward,
   Volume1,
   Volume2,
   VolumeX,
+  ZoomIn,
 } from "lucide-react";
 import clsx from "clsx";
 import { formatDuration } from "../../utils/time";
@@ -55,6 +57,13 @@ export interface PlayerOverlayProps {
   onToggleFullscreen: () => void;
   onCast: () => void;
   onChangePlaybackRate: (rate: number) => void;
+  /** Current video zoom factor (1 = 100%, no zoom). */
+  videoScale: number;
+  onVideoScale: (scale: number) => void;
+  /** A next episode is queued (series only) — shows the in-player skip button. */
+  canPlayNext?: boolean;
+  nextEpisodeLabel?: string | null;
+  onPlayNext?: () => void;
   canDownload: boolean;
   downloadBusy: boolean;
   downloadHint: string | null;
@@ -65,6 +74,9 @@ export interface PlayerOverlayProps {
 }
 
 const RATES = [0.5, 0.75, 1, 1.25, 1.5, 2];
+const ZOOM_MIN = 1;
+const ZOOM_MAX = 5;
+const ZOOM_PRESETS = [1, 1.5, 2, 3, 4];
 
 export const PlayerOverlay = ({
   title,
@@ -98,6 +110,11 @@ export const PlayerOverlay = ({
   onToggleFullscreen,
   onCast,
   onChangePlaybackRate,
+  videoScale,
+  onVideoScale,
+  canPlayNext = false,
+  nextEpisodeLabel = null,
+  onPlayNext,
   canDownload,
   downloadBusy,
   downloadHint,
@@ -107,6 +124,7 @@ export const PlayerOverlay = ({
   onErrorAction,
 }: PlayerOverlayProps) => {
   const [ratesOpen, setRatesOpen] = useState(false);
+  const [zoomOpen, setZoomOpen] = useState(false);
   const scrubberRef = useRef<HTMLDivElement | null>(null);
   const [scrubbing, setScrubbing] = useState(false);
   const [hoverPreview, setHoverPreview] = useState<{ left: number; time: number } | null>(null);
@@ -120,6 +138,15 @@ export const PlayerOverlay = ({
     window.addEventListener("click", close);
     return () => window.removeEventListener("click", close);
   }, [ratesOpen]);
+
+  useEffect(() => {
+    if (!zoomOpen) return;
+    const close = () => setZoomOpen(false);
+    window.addEventListener("click", close);
+    return () => window.removeEventListener("click", close);
+  }, [zoomOpen]);
+
+  const zoomPercent = Math.round(videoScale * 100);
 
   const seekFromClientX = (clientX: number): void => {
     const el = scrubberRef.current;
@@ -311,6 +338,17 @@ export const PlayerOverlay = ({
           >
             <RotateCw size={18} />
           </button>
+          {canPlayNext ? (
+            <button
+              type="button"
+              className="control-btn"
+              aria-label="Play next episode"
+              title={nextEpisodeLabel ? `Next episode · ${nextEpisodeLabel}` : "Play next episode"}
+              onClick={onPlayNext}
+            >
+              <SkipForward size={18} />
+            </button>
+          ) : null}
 
           <div className={clsx("ml-1 flex items-center gap-1", !volumePercentMode && "group")}>
             <button type="button" className="control-btn" aria-label="Mute" onClick={onToggleMute}>
@@ -374,10 +412,65 @@ export const PlayerOverlay = ({
               <button
                 type="button"
                 className="control-btn"
+                aria-label="Video zoom"
+                title={`Zoom ${zoomPercent}% — enlarge low-res video`}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setRatesOpen(false);
+                  setZoomOpen((v) => !v);
+                }}
+              >
+                <ZoomIn size={18} />
+                <span className="ml-1 text-[11px] tabular-nums">{zoomPercent}%</span>
+              </button>
+              {zoomOpen ? (
+                <div
+                  className="absolute bottom-full right-0 mb-2 w-52 rounded-md border border-slate-700 bg-slate-950/95 p-3 shadow-xl"
+                  onClick={(event) => event.stopPropagation()}
+                >
+                  <div className="mb-2 flex items-center justify-between text-xs">
+                    <span className="text-slate-300">Zoom</span>
+                    <span className="tabular-nums text-cyan-300">{zoomPercent}%</span>
+                  </div>
+                  <input
+                    type="range"
+                    min={ZOOM_MIN * 100}
+                    max={ZOOM_MAX * 100}
+                    step={5}
+                    value={zoomPercent}
+                    onChange={(event) => onVideoScale(Number(event.target.value) / 100)}
+                    aria-label="Video zoom percent"
+                    className="w-full accent-cyan-500"
+                  />
+                  <div className="mt-2 flex flex-wrap gap-1">
+                    {ZOOM_PRESETS.map((preset) => (
+                      <button
+                        key={preset}
+                        type="button"
+                        className={clsx(
+                          "rounded px-2 py-1 text-[11px] tabular-nums transition",
+                          Math.abs(preset - videoScale) < 0.001
+                            ? "bg-cyan-500/80 text-white"
+                            : "bg-slate-800 text-slate-200 hover:bg-slate-700",
+                        )}
+                        onClick={() => onVideoScale(preset)}
+                      >
+                        {Math.round(preset * 100)}%
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+            </div>
+            <div className="relative">
+              <button
+                type="button"
+                className="control-btn"
                 aria-label="Playback speed"
                 title={`Speed ${playbackRate}x`}
                 onClick={(event) => {
                   event.stopPropagation();
+                  setZoomOpen(false);
                   setRatesOpen((v) => !v);
                 }}
               >

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import clsx from "clsx";
 import Hls from "hls.js";
 import mpegts from "mpegts.js";
-import type { PlaylistItem } from "../../types/models";
+import type { EpisodeItem, PlaylistItem } from "../../types/models";
 import { useChromecast } from "../../hooks/useChromecast";
 import { downloadMediaFile, isHlsUrl } from "../../utils/downloadStream";
 import { categoryForSection, writeHttpsCapability } from "../../utils/httpsCapability";
@@ -26,8 +26,17 @@ interface VideoPlayerProps {
   resumeFrom: number;
   playbackBlocked?: boolean;
   onPlaybackBlockedAction?: () => void;
+  /** Next episode in the series (null for non-series or the last episode). */
+  nextEpisode?: EpisodeItem | null;
+  onPlayNextEpisode?: () => void;
   className?: string;
 }
+
+const VIDEO_ZOOM_MIN = 1;
+const VIDEO_ZOOM_MAX = 5;
+const VIDEO_ZOOM_STEP = 0.1;
+const clampVideoZoom = (value: number): number =>
+  Math.min(VIDEO_ZOOM_MAX, Math.max(VIDEO_ZOOM_MIN, Math.round(value * 100) / 100));
 
 const CONTROLS_HIDE_MS = 2400;
 const SOURCE_STARTUP_TIMEOUT_MS = 12000;
@@ -327,6 +336,8 @@ export const VideoPlayer = ({
   resumeFrom,
   playbackBlocked = false,
   onPlaybackBlockedAction,
+  nextEpisode = null,
+  onPlayNextEpisode,
   className,
 }: VideoPlayerProps) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -368,6 +379,17 @@ export const VideoPlayer = ({
   const [controlsVisible, setControlsVisible] = useState(true);
   const [downloadBusy, setDownloadBusy] = useState(false);
   const [downloadHint, setDownloadHint] = useState<string | null>(null);
+  // CSS zoom for the video layer (1 = fit as-is). Lets the user enlarge low-res
+  // streams that would otherwise render small/letterboxed, or crop-zoom into any
+  // stream. Applied as a transform, so playback/controls are unaffected.
+  const [videoScale, setVideoScale] = useState(1);
+
+  const setVideoZoom = useCallback((value: number) => {
+    setVideoScale(clampVideoZoom(value));
+  }, []);
+  const nudgeVideoZoom = useCallback((delta: number) => {
+    setVideoScale((prev) => clampVideoZoom(prev + delta));
+  }, []);
 
   useEffect(() => {
     const onUnhandledRejection = (event: PromiseRejectionEvent) => {
@@ -423,6 +445,7 @@ export const VideoPlayer = ({
   useEffect(() => {
     setDownloadHint(null);
     setDownloadBusy(false);
+    setVideoScale(1);
     clearCastMessage();
   }, [item?.id, clearCastMessage]);
 
@@ -1463,6 +1486,29 @@ export const VideoPlayer = ({
           event.preventDefault();
           void togglePip();
           break;
+        case "+":
+        case "=":
+          event.preventDefault();
+          nudgeVideoZoom(VIDEO_ZOOM_STEP);
+          bumpControls();
+          break;
+        case "-":
+        case "_":
+          event.preventDefault();
+          nudgeVideoZoom(-VIDEO_ZOOM_STEP);
+          bumpControls();
+          break;
+        case "0":
+          event.preventDefault();
+          setVideoZoom(1);
+          bumpControls();
+          break;
+        case "n":
+          if (onPlayNextEpisode && nextEpisode) {
+            event.preventDefault();
+            onPlayNextEpisode();
+          }
+          break;
         default:
           break;
       }
@@ -1474,6 +1520,10 @@ export const VideoPlayer = ({
     cssFullscreen,
     handleOverlayVolume,
     isFullscreen,
+    nextEpisode,
+    nudgeVideoZoom,
+    onPlayNextEpisode,
+    setVideoZoom,
     skipBy,
     toggleFullscreen,
     toggleMute,
@@ -1514,7 +1564,7 @@ export const VideoPlayer = ({
       <div
         ref={containerRef}
         className={clsx(
-          "player-viewport group/player",
+          "player-viewport group/player overflow-hidden",
           // CSS fullscreen fallback: cover the whole page above the app chrome.
           // Must REPLACE `relative`, not sit beside it — Tailwind's `relative`
           // rule comes after `fixed` in the stylesheet and would win.
@@ -1534,7 +1584,12 @@ export const VideoPlayer = ({
       >
         <video
           ref={videoRef}
-          className="max-h-full max-w-full object-contain"
+          className="max-h-full max-w-full object-contain transition-transform duration-150"
+          style={
+            videoScale !== 1
+              ? { transform: `scale(${videoScale})`, transformOrigin: "center center" }
+              : undefined
+          }
           controls={false}
           playsInline
           onClick={togglePlay}
@@ -1572,6 +1627,13 @@ export const VideoPlayer = ({
           onToggleFullscreen={() => void toggleFullscreen()}
           onCast={handleCastClick}
           onChangePlaybackRate={setRate}
+          videoScale={videoScale}
+          onVideoScale={setVideoZoom}
+          canPlayNext={Boolean(nextEpisode)}
+          nextEpisodeLabel={
+            nextEpisode ? `S${nextEpisode.season ?? 0}E${nextEpisode.episode ?? 0} · ${nextEpisode.title}` : null
+          }
+          onPlayNext={onPlayNextEpisode}
           canDownload={Boolean(item)}
           downloadBusy={downloadBusy}
           downloadHint={downloadHint}

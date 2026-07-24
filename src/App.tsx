@@ -1017,6 +1017,8 @@ const App = () => {
               resumeFrom={currentResume}
               playbackBlocked={!canPlayVideos}
               onPlaybackBlockedAction={showBackendRequired}
+              nextEpisode={currentNextEpisode}
+              onPlayNextEpisode={() => currentNextEpisode && handlePlay(currentNextEpisode)}
             />
             {currentNextEpisode ? (
               <PlayerNavBar
