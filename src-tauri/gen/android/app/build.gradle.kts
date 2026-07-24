@@ -13,6 +13,15 @@ val tauriProperties = Properties().apply {
     }
 }
 
+// Optional release signing. `key.properties` (gitignored) supplies the keystore;
+// without it, release builds are simply left unsigned.
+val keystorePropertiesFile = rootProject.file("key.properties")
+val keystoreProperties = Properties().apply {
+    if (keystorePropertiesFile.exists()) {
+        keystorePropertiesFile.inputStream().use { load(it) }
+    }
+}
+
 android {
     compileSdk = 36
     namespace = "com.communityiptv.player"
@@ -23,6 +32,16 @@ android {
         targetSdk = 36
         versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()
         versionName = tauriProperties.getProperty("tauri.android.versionName", "1.0")
+    }
+    signingConfigs {
+        if (keystorePropertiesFile.exists()) {
+            create("release") {
+                keyAlias = keystoreProperties["keyAlias"] as String
+                keyPassword = keystoreProperties["keyPassword"] as String
+                storeFile = file(keystoreProperties["storeFile"] as String)
+                storePassword = keystoreProperties["storePassword"] as String
+            }
+        }
     }
     buildTypes {
         getByName("debug") {
@@ -37,6 +56,9 @@ android {
             }
         }
         getByName("release") {
+            if (keystorePropertiesFile.exists()) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             isMinifyEnabled = true
             proguardFiles(
                 *fileTree(".") { include("**/*.pro") }
