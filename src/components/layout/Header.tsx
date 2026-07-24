@@ -77,13 +77,30 @@ export const Header = ({
         )}
       </div>
 
-      <div className="pointer-events-none absolute inset-x-4 inset-y-0 flex items-center justify-center sm:inset-x-8">
+      {/* Full centered search bar — only where there's room (tablet/desktop). On
+          phones it would overflow and sit under the right-side buttons. */}
+      <div className="pointer-events-none absolute inset-x-4 inset-y-0 hidden items-center justify-center sm:inset-x-8 sm:flex">
         <div className="pointer-events-auto max-w-full">
           <SearchTrigger onOpenSearch={onOpenSearch} />
         </div>
       </div>
 
       <div className="relative z-10 ml-auto flex shrink-0 items-center gap-2">
+        {/* Compact search for phones (tap to open the search overlay + soft
+            keyboard). Wrapped in a plain div because `.btn` is defined after
+            Tailwind utilities and would otherwise override `sm:hidden`, leaving a
+            duplicate search control on desktop. */}
+        <div className="sm:hidden">
+          <button
+            type="button"
+            className="btn border-white/10 bg-white/[0.04] px-2.5 py-2"
+            onClick={onOpenSearch}
+            aria-label="Open search"
+            title="Search"
+          >
+            <Search size={16} />
+          </button>
+        </div>
         <button
           type="button"
           className="btn relative border-white/10 bg-white/[0.04] px-2.5 py-2"
