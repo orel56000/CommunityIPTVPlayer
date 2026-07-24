@@ -1584,7 +1584,13 @@ export const VideoPlayer = ({
       >
         <video
           ref={videoRef}
-          className="max-h-full max-w-full object-contain transition-transform duration-150"
+          className={clsx(
+            "max-h-full max-w-full bg-black object-contain transition-transform duration-150",
+            // With no stream selected the element has no source; hide it so the
+            // WebView's default gray "no video" poster doesn't show — the black
+            // viewport and the overlay ("No stream selected") remain instead.
+            !item && "hidden",
+          )}
           style={
             videoScale !== 1
               ? { transform: `scale(${videoScale})`, transformOrigin: "center center" }

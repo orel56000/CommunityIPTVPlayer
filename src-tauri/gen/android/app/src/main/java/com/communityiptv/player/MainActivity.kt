@@ -2,7 +2,11 @@ package com.communityiptv.player
 
 import android.os.Bundle
 import android.system.Os
+import android.view.View
 import androidx.activity.enableEdgeToEdge
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 
 class MainActivity : TauriActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
@@ -22,5 +26,19 @@ class MainActivity : TauriActivity() {
     }
     enableEdgeToEdge()
     super.onCreate(savedInstanceState)
+
+    // Android draws the WebView edge-to-edge (forced on API 35+). Pad the content
+    // by the status/navigation-bar and cutout insets so the app UI isn't hidden
+    // behind them. The padded strips show the dark window background; keep the
+    // status-bar icons light for the dark UI.
+    val content = findViewById<View>(android.R.id.content)
+    ViewCompat.setOnApplyWindowInsetsListener(content) { view, insets ->
+      val bars = insets.getInsets(
+        WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout(),
+      )
+      view.setPadding(bars.left, bars.top, bars.right, bars.bottom)
+      insets
+    }
+    WindowInsetsControllerCompat(window, window.decorView).isAppearanceLightStatusBars = false
   }
 }
