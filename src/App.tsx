@@ -25,6 +25,7 @@ import { usePlayer } from "./hooks/usePlayer";
 import { useDebouncedValue } from "./hooks/useDebouncedValue";
 import { useBackendConnection } from "./hooks/useBackendConnection";
 import { Header } from "./components/layout/Header";
+import { MobileMenu } from "./components/layout/MobileMenu";
 import { SearchOverlay, type SearchOpenFocus } from "./components/layout/SearchOverlay";
 import { PlaylistImportModal } from "./components/playlist/PlaylistImportModal";
 import { VideoPlayer } from "./components/player/VideoPlayer";
@@ -68,6 +69,7 @@ const App = () => {
   const [deepLinkError, setDeepLinkError] = useState<string | null>(null);
   const [loadingSeriesId, setLoadingSeriesId] = useState<string | null>(null);
   const [connectionOpen, setConnectionOpen] = useState(false);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [connectionPlaybackError, setConnectionPlaybackError] = useState<string | null>(null);
   const backendConnection = useBackendConnection();
   const canPlayVideos = backendConnection.connected;
@@ -981,6 +983,32 @@ const App = () => {
     />
   );
 
+  // Playlists + stream-details panels. On tablet/desktop they live in the right
+  // column; on phones they move into the slide-in menu drawer (same elements,
+  // rendered in whichever spot is visible for the current breakpoint).
+  const playlistsPanel = (
+    <PlaylistManager
+      playlists={state.playlists}
+      activePlaylistId={state.activePlaylistId}
+      onSelect={setActivePlaylistId}
+      onDelete={deletePlaylist}
+      onDownload={(playlistId) => {
+        void downloadPlaylist(playlistId);
+      }}
+      onRename={renamePlaylist}
+      onRefresh={refreshPlaylist}
+      onAddPlaylist={() => setImportOpen(true)}
+    />
+  );
+  const detailsPanel = (
+    <DetailsPanel
+      item={playerState.currentItem}
+      resumeAt={currentResume}
+      episodePageUrl={episodePageUrl}
+      onGoToBrowse={goToBrowseFromDetails}
+    />
+  );
+
   return (
     <div className="flex h-full flex-col overflow-hidden text-slate-100">
       <Header
@@ -991,6 +1019,7 @@ const App = () => {
         onOpenNowPlaying={openSearchForNowPlaying}
         onOpenBackendConnection={() => setConnectionOpen(true)}
         onToggleRightPanel={toggleRightPanel}
+        onToggleMobileMenu={() => setMobileMenuOpen((open) => !open)}
       />
       <main className="mx-auto flex min-h-0 w-full max-w-[1920px] flex-1 flex-col overflow-hidden px-4 py-3 lg:px-8">
         <div
@@ -1046,30 +1075,25 @@ const App = () => {
               />
             ) : null}
           </div>
+          {/* Tablet/desktop right column. Hidden on phones — the same panels are
+              in the slide-in menu drawer there. */}
           {state.settings.rightPanelOpen ? (
-            <div className="flex h-full min-h-0 flex-col gap-3 overflow-hidden">
-              <PlaylistManager
-                playlists={state.playlists}
-                activePlaylistId={state.activePlaylistId}
-                onSelect={setActivePlaylistId}
-                onDelete={deletePlaylist}
-                onDownload={(playlistId) => {
-                  void downloadPlaylist(playlistId);
-                }}
-                onRename={renamePlaylist}
-                onRefresh={refreshPlaylist}
-                onAddPlaylist={() => setImportOpen(true)}
-              />
-              <DetailsPanel
-                item={playerState.currentItem}
-                resumeAt={currentResume}
-                episodePageUrl={episodePageUrl}
-                onGoToBrowse={goToBrowseFromDetails}
-              />
+            <div className="hidden h-full min-h-0 flex-col gap-3 overflow-hidden sm:flex">
+              {playlistsPanel}
+              {detailsPanel}
             </div>
           ) : null}
         </div>
       </main>
+      <MobileMenu
+        open={mobileMenuOpen}
+        onClose={() => setMobileMenuOpen(false)}
+        backendStatus={backendConnection.status}
+        onOpenBackendConnection={() => setConnectionOpen(true)}
+        onOpenSettings={() => openSearch({ category: "settings" })}
+        playlistsPanel={playlistsPanel}
+        detailsPanel={detailsPanel}
+      />
       <SearchOverlay
         open={searchOpen}
         onClose={closeSearch}

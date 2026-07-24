@@ -1,4 +1,4 @@
-import { ChevronRight, MonitorPlay, PanelRightClose, PanelRightOpen, Search, Server } from "lucide-react";
+import { ChevronRight, Menu, MonitorPlay, PanelRightClose, PanelRightOpen, Search, Server } from "lucide-react";
 import type { PlaylistItem } from "../../types/models";
 import { GitHubIcon } from "../shared/GitHubIcon";
 import type { RelayStatus } from "../../utils/relayDiscovery";
@@ -11,7 +11,16 @@ interface HeaderProps {
   onOpenNowPlaying: () => void;
   onOpenBackendConnection: () => void;
   onToggleRightPanel: () => void;
+  /** Phones: opens the slide-in menu drawer (holds backend/settings/GitHub + panels). */
+  onToggleMobileMenu: () => void;
 }
+
+const statusDotClass = (status: RelayStatus): string =>
+  status === "available"
+    ? "bg-emerald-400"
+    : status === "checking" || status === "unknown"
+      ? "bg-amber-400"
+      : "bg-rose-500";
 
 const SearchTrigger = ({ onOpenSearch }: { onOpenSearch: () => void }) => (
   <button type="button" className="glass-search-trigger" onClick={onOpenSearch} aria-label="Open search">
@@ -31,6 +40,7 @@ export const Header = ({
   onOpenNowPlaying,
   onOpenBackendConnection,
   onToggleRightPanel,
+  onToggleMobileMenu,
 }: HeaderProps) => (
   <header className="sticky top-0 z-20 border-b border-white/[0.06] bg-slate-950/65 backdrop-blur-2xl supports-[backdrop-filter]:bg-slate-950/50">
     <div className="relative mx-auto flex h-14 max-w-[1920px] items-center px-4 sm:h-16 lg:px-8">
@@ -86,10 +96,10 @@ export const Header = ({
       </div>
 
       <div className="relative z-10 ml-auto flex shrink-0 items-center gap-2">
-        {/* Compact search for phones (tap to open the search overlay + soft
-            keyboard). Wrapped in a plain div because `.btn` is defined after
-            Tailwind utilities and would otherwise override `sm:hidden`, leaving a
-            duplicate search control on desktop. */}
+        {/* PHONES: just Search + Menu. The menu drawer holds backend/settings/
+            GitHub and the playlists/details panels. (Wrapped in plain divs so
+            `sm:hidden` / `hidden sm:block` aren't overridden by the `.btn` rule,
+            which is defined after Tailwind utilities.) */}
         <div className="sm:hidden">
           <button
             type="button"
@@ -101,44 +111,61 @@ export const Header = ({
             <Search size={16} />
           </button>
         </div>
-        <button
-          type="button"
-          className="btn relative border-white/10 bg-white/[0.04] px-2.5 py-2"
-          onClick={onOpenBackendConnection}
-          aria-label="Backend connection"
-          title="Backend connection"
-        >
-          <Server size={16} />
-          <span
-            className={
-              backendStatus === "available"
-                ? "absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full bg-emerald-400 ring-2 ring-slate-950"
-                : backendStatus === "checking" || backendStatus === "unknown"
-                  ? "absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full bg-amber-400 ring-2 ring-slate-950"
-                  : "absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full bg-rose-500 ring-2 ring-slate-950"
-            }
-            aria-hidden
-          />
-        </button>
-        <button
-          type="button"
-          className="btn border-white/10 bg-white/[0.04] px-2.5 py-2"
-          onClick={onToggleRightPanel}
-          aria-label={rightPanelOpen ? "Hide side panel" : "Show side panel"}
-          title={rightPanelOpen ? "Hide playlists & details" : "Show playlists & details"}
-        >
-          {rightPanelOpen ? <PanelRightClose size={16} /> : <PanelRightOpen size={16} />}
-        </button>
-        <a
-          className="btn hidden border-white/10 bg-white/[0.04] px-3 py-2 text-sm sm:inline-flex"
-          href="https://github.com/orel56000/CommunityIPTVPlayer"
-          target="_blank"
-          rel="noopener noreferrer"
-          aria-label="Open Community IPTV Player repository"
-          title="Open GitHub repository"
-        >
-          <GitHubIcon className="h-4 w-4 text-slate-200" />
-        </a>
+        <div className="sm:hidden">
+          <button
+            type="button"
+            className="btn relative border-white/10 bg-white/[0.04] px-2.5 py-2"
+            onClick={onToggleMobileMenu}
+            aria-label="Menu"
+            title="Menu"
+          >
+            <Menu size={16} />
+            <span
+              className={`absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full ring-2 ring-slate-950 ${statusDotClass(backendStatus)}`}
+              aria-hidden
+            />
+          </button>
+        </div>
+
+        {/* TABLET/DESKTOP: backend, panel toggle, GitHub. */}
+        <div className="hidden sm:block">
+          <button
+            type="button"
+            className="btn relative border-white/10 bg-white/[0.04] px-2.5 py-2"
+            onClick={onOpenBackendConnection}
+            aria-label="Backend connection"
+            title="Backend connection"
+          >
+            <Server size={16} />
+            <span
+              className={`absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full ring-2 ring-slate-950 ${statusDotClass(backendStatus)}`}
+              aria-hidden
+            />
+          </button>
+        </div>
+        <div className="hidden sm:block">
+          <button
+            type="button"
+            className="btn border-white/10 bg-white/[0.04] px-2.5 py-2"
+            onClick={onToggleRightPanel}
+            aria-label={rightPanelOpen ? "Hide side panel" : "Show side panel"}
+            title={rightPanelOpen ? "Hide playlists & details" : "Show playlists & details"}
+          >
+            {rightPanelOpen ? <PanelRightClose size={16} /> : <PanelRightOpen size={16} />}
+          </button>
+        </div>
+        <div className="hidden sm:block">
+          <a
+            className="btn border-white/10 bg-white/[0.04] px-3 py-2 text-sm"
+            href="https://github.com/orel56000/CommunityIPTVPlayer"
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label="Open Community IPTV Player repository"
+            title="Open GitHub repository"
+          >
+            <GitHubIcon className="h-4 w-4 text-slate-200" />
+          </a>
+        </div>
       </div>
     </div>
   </header>
