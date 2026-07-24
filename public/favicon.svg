@@ -10,7 +10,7 @@
   <rect width="512" height="512" rx="120" fill="url(#ctvGrad)" />
   <rect x="7" y="7" width="498" height="498" rx="113" fill="none" stroke="#ffffff" stroke-opacity=".14" stroke-width="6" />
   <!-- lucide "monitor-play" glyph (24-grid), scaled & centered, white stroke -->
-  <g transform="translate(256 256) scale(13) translate(-12 -12)" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <g transform="translate(256 256) scale(10) translate(-12 -12)" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
     <rect x="2" y="3" width="20" height="14" rx="2" />
     <path d="M15.033 9.44a.647.647 0 0 1 0 1.12l-4.065 2.352a.645.645 0 0 1-.968-.56V7.648a.645.645 0 0 1 .967-.56z" />
     <path d="M12 17v4" />
