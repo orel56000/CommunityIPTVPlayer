@@ -236,6 +236,19 @@ pub fn run() {
         // Opens the GitHub release / APK URL in the system browser from the
         // in-app updater.
         .plugin(tauri_plugin_opener::init())
+        // Android: Kotlin plugin that hands the downloaded APK to the system
+        // package installer (one-tap in-app update).
+        .plugin({
+            #[cfg(target_os = "android")]
+            {
+                relay::installer_plugin()
+            }
+            #[cfg(not(target_os = "android"))]
+            {
+                // No-op plugin on non-Android targets.
+                tauri::plugin::Builder::<tauri::Wry, ()>::new("installer-noop").build()
+            }
+        })
         .setup(|app| {
             // Desktop serves the built UI from the relay (mode A: window loads
             // http://127.0.0.1:PORT). Mobile loads the bundled UI via Tauri's

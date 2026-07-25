@@ -160,6 +160,12 @@ pub fn router(
         // stale UI to every new window. Loopback-only.
         .route("/api/takeover", post(takeover))
         .route("/api/server-info", get(server_info))
+        // In-app updater: download the release APK and hand it to the Android
+        // package installer (Android only; no-op error elsewhere).
+        .route(
+            "/api/update/install",
+            post(update_install).route_layer(axum::extract::DefaultBodyLimit::max(256 * 1024 * 1024)),
+        )
         .route("/api/stream", get(stream))
         .route("/api/restream/index.m3u8", get(restream_manifest))
         .route("/api/restream/:session/:file", get(restream_segment))
@@ -509,6 +515,112 @@ async fn server_info() -> Response {
         .unwrap_or_else(|_| "{}".to_string()),
     )
         .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// /api/update/install — download the release APK and open the system installer
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct InstallQuery {
+    url: Option<String>,
+}
+
+async fn update_install(State(state): State<RelayState>, Query(q): Query<InstallQuery>) -> Response {
+    let url = match q.url.as_deref() {
+        Some(u) if !u.is_empty() => u.to_string(),
+        _ => return cors_text(StatusCode::BAD_REQUEST, "Missing url query parameter".to_string()),
+    };
+    // Only ever install our own signed GitHub release assets.
+    let host_ok = url::Url::parse(&url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
+        .map(|h| h == "github.com" || h.ends_with(".githubusercontent.com"))
+        .unwrap_or(false);
+    if !host_ok {
+        return cors_text(StatusCode::FORBIDDEN, "Only GitHub release URLs are allowed".to_string());
+    }
+
+    // Download into the app cache dir (TMPDIR on Android → covered by the
+    // FileProvider's cache-path, so it can be shared with the installer).
+    let apk_path = std::env::temp_dir().join("ctv-update.apk");
+    let bytes = match state
+        .http
+        .get(&url)
+        .header(header::USER_AGENT, "CommunityIPTVPlayer")
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => match resp.bytes().await {
+            Ok(bytes) => bytes,
+            Err(e) => return cors_text(StatusCode::BAD_GATEWAY, format!("Download failed: {e}")),
+        },
+        Ok(resp) => {
+            return cors_text(StatusCode::BAD_GATEWAY, format!("Download HTTP {}", resp.status()));
+        }
+        Err(e) => return cors_text(StatusCode::BAD_GATEWAY, format!("Download failed: {e}")),
+    };
+    if let Err(e) = tokio::fs::write(&apk_path, &bytes).await {
+        return cors_text(StatusCode::INTERNAL_SERVER_ERROR, format!("Could not save APK: {e}"));
+    }
+    log::info!("[update] downloaded {} bytes to {}", bytes.len(), apk_path.display());
+
+    match launch_installer(&apk_path).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => {
+            log::error!("[update] installer failed: {e}");
+            cors_text(StatusCode::INTERNAL_SERVER_ERROR, e)
+        }
+    }
+}
+
+// The system context/Activity needed to launch the installer isn't reachable
+// from the relay's own threads (Tauri v2 doesn't populate `ndk_context`), so we
+// hand the APK path to a tiny Kotlin plugin that has the Activity and can build
+// the FileProvider URI + ACTION_VIEW intent. The plugin handle is captured once
+// at startup via `installer_plugin()` and stored here.
+#[cfg(target_os = "android")]
+static INSTALLER: std::sync::OnceLock<tauri::plugin::PluginHandle<tauri::Wry>> =
+    std::sync::OnceLock::new();
+
+/// Registers the Kotlin `InstallerPlugin` and stashes its handle for later use
+/// by [`update_install`]. Add this to the Tauri builder on Android.
+#[cfg(target_os = "android")]
+pub fn installer_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
+    tauri::plugin::Builder::<tauri::Wry, ()>::new("installer")
+        .setup(|_app, api| {
+            let handle = api.register_android_plugin("com.communityiptv.player", "InstallerPlugin")?;
+            let _ = INSTALLER.set(handle);
+            Ok(())
+        })
+        .build()
+}
+
+/// Hand the downloaded APK to Android's package installer via the Kotlin plugin.
+#[cfg(target_os = "android")]
+async fn launch_installer(apk_path: &std::path::Path) -> Result<(), String> {
+    #[derive(Serialize)]
+    struct InstallPayload {
+        path: String,
+    }
+    let handle = INSTALLER
+        .get()
+        .ok_or_else(|| "installer plugin not registered".to_string())?;
+    handle
+        .run_mobile_plugin_async::<serde_json::Value>(
+            "install",
+            InstallPayload {
+                path: apk_path.to_string_lossy().into_owned(),
+            },
+        )
+        .await
+        .map(|_| ())
+        .map_err(|e| format!("installer plugin: {e}"))
+}
+
+#[cfg(not(target_os = "android"))]
+async fn launch_installer(_apk_path: &std::path::Path) -> Result<(), String> {
+    Err("In-app install is only available on Android".to_string())
 }
 
 // ---------------------------------------------------------------------------

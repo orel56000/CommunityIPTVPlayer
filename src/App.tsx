@@ -28,6 +28,7 @@ import { Header } from "./components/layout/Header";
 import { MobileMenu } from "./components/layout/MobileMenu";
 import { UpdateBanner } from "./components/shared/UpdateBanner";
 import { checkForUpdate, type UpdateInfo } from "./utils/appUpdate";
+import { getRelayBase } from "./utils/secureUrl";
 import { SearchOverlay, type SearchOpenFocus } from "./components/layout/SearchOverlay";
 import { PlaylistImportModal } from "./components/playlist/PlaylistImportModal";
 import { VideoPlayer } from "./components/player/VideoPlayer";
@@ -97,12 +98,24 @@ const App = () => {
 
   const handleUpdate = useCallback(async () => {
     if (!updateInfo) return;
-    // Android: hand the APK URL to the system so it downloads + installs; other
-    // platforms open the release page to grab the right installer.
     const isAndroid = typeof navigator !== "undefined" && /Android/i.test(navigator.userAgent);
-    const target = isAndroid && updateInfo.apkUrl ? updateInfo.apkUrl : updateInfo.releaseUrl;
     setUpdateBusy(true);
     try {
+      // One-tap Android install: the relay downloads the APK and opens the system
+      // installer. Fall back to the browser (download the APK / open the release
+      // page) if that isn't available or fails.
+      if (isAndroid && backendConnection.isNative && updateInfo.apkUrl) {
+        try {
+          const res = await fetch(
+            `${getRelayBase()}/api/update/install?url=${encodeURIComponent(updateInfo.apkUrl)}`,
+            { method: "POST" },
+          );
+          if (res.ok) return; // installer launched
+        } catch {
+          /* fall through to browser download */
+        }
+      }
+      const target = isAndroid && updateInfo.apkUrl ? updateInfo.apkUrl : updateInfo.releaseUrl;
       if (backendConnection.isNative) {
         const { openUrl } = await import("@tauri-apps/plugin-opener");
         await openUrl(target);
