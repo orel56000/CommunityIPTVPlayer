@@ -26,6 +26,8 @@ import { useDebouncedValue } from "./hooks/useDebouncedValue";
 import { useBackendConnection } from "./hooks/useBackendConnection";
 import { Header } from "./components/layout/Header";
 import { MobileMenu } from "./components/layout/MobileMenu";
+import { UpdateBanner } from "./components/shared/UpdateBanner";
+import { checkForUpdate, type UpdateInfo } from "./utils/appUpdate";
 import { SearchOverlay, type SearchOpenFocus } from "./components/layout/SearchOverlay";
 import { PlaylistImportModal } from "./components/playlist/PlaylistImportModal";
 import { VideoPlayer } from "./components/player/VideoPlayer";
@@ -71,10 +73,48 @@ const App = () => {
   const [connectionOpen, setConnectionOpen] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [connectionPlaybackError, setConnectionPlaybackError] = useState<string | null>(null);
+  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
+  const [updateDismissed, setUpdateDismissed] = useState(false);
+  const [updateBusy, setUpdateBusy] = useState(false);
+  const updateCheckedRef = useRef(false);
   const backendConnection = useBackendConnection();
   const canPlayVideos = backendConnection.connected;
   const shouldRenderAnalytics =
     typeof window !== "undefined" && !["localhost", "127.0.0.1"].includes(window.location.hostname);
+
+  // Release-only auto-update check. Debug builds report `debug: true` from the
+  // relay and are skipped, and the web build (no native runtime) never checks.
+  const serverInfo = backendConnection.serverInfo;
+  useEffect(() => {
+    if (updateCheckedRef.current) return;
+    if (!backendConnection.isNative) return;
+    if (!serverInfo || serverInfo.debug || !serverInfo.version) return;
+    updateCheckedRef.current = true;
+    void checkForUpdate(serverInfo.version).then((info) => {
+      if (info) setUpdateInfo(info);
+    });
+  }, [backendConnection.isNative, serverInfo]);
+
+  const handleUpdate = useCallback(async () => {
+    if (!updateInfo) return;
+    // Android: hand the APK URL to the system so it downloads + installs; other
+    // platforms open the release page to grab the right installer.
+    const isAndroid = typeof navigator !== "undefined" && /Android/i.test(navigator.userAgent);
+    const target = isAndroid && updateInfo.apkUrl ? updateInfo.apkUrl : updateInfo.releaseUrl;
+    setUpdateBusy(true);
+    try {
+      if (backendConnection.isNative) {
+        const { openUrl } = await import("@tauri-apps/plugin-opener");
+        await openUrl(target);
+      } else {
+        window.open(target, "_blank", "noopener");
+      }
+    } catch {
+      window.open(updateInfo.releaseUrl, "_blank", "noopener");
+    } finally {
+      setUpdateBusy(false);
+    }
+  }, [updateInfo, backendConnection.isNative]);
 
   const setPlaylists = useCallback((playlists: SavedPlaylist[]) => setState((prev) => ({ ...prev, playlists })), []);
   const setActivePlaylistId = useCallback(
@@ -1030,6 +1070,14 @@ const App = () => {
           }
         >
           <div className="flex h-full min-h-0 flex-col gap-3 overflow-hidden">
+            {updateInfo && !updateDismissed ? (
+              <UpdateBanner
+                update={updateInfo}
+                busy={updateBusy}
+                onUpdate={() => void handleUpdate()}
+                onDismiss={() => setUpdateDismissed(true)}
+              />
+            ) : null}
             <VideoPlayer
               className="min-h-0 flex-1"
               item={playerState.currentItem}

@@ -68,6 +68,8 @@ export interface BackendServerInfo {
   version?: string;
   port?: number;
   origins?: string[];
+  /** True for debug builds; the updater is disabled when true. */
+  debug?: boolean;
 }
 
 export interface BackendSnapshot {

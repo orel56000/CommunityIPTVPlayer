@@ -233,6 +233,9 @@ pub fn run() {
                 .level(log::LevelFilter::Info)
                 .build(),
         )
+        // Opens the GitHub release / APK URL in the system browser from the
+        // in-app updater.
+        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             // Desktop serves the built UI from the relay (mode A: window loads
             // http://127.0.0.1:PORT). Mobile loads the bundled UI via Tauri's

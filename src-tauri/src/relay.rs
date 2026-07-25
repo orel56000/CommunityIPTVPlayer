@@ -469,6 +469,9 @@ struct ServerInfo {
     version: &'static str,
     port: u16,
     origins: Vec<String>,
+    /// True for debug builds (`tauri … build --debug` / `dev`). The frontend
+    /// only runs the auto-updater when this is false (customer release builds).
+    debug: bool,
 }
 
 async fn server_info() -> Response {
@@ -501,6 +504,7 @@ async fn server_info() -> Response {
             version: env!("CARGO_PKG_VERSION"),
             port,
             origins,
+            debug: cfg!(debug_assertions),
         })
         .unwrap_or_else(|_| "{}".to_string()),
     )
