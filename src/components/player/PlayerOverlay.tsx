@@ -401,7 +401,9 @@ export const PlayerOverlay = ({
                   onChange={(event) => onVolume(Number(event.target.value))}
                   aria-label={`Volume ${volumePercent}%`}
                   title={`Volume ${volumePercent}%`}
-                  className="ml-1 w-0 opacity-0 transition-all duration-200 group-hover:w-24 group-hover:opacity-100 focus:w-24 focus:opacity-100 accent-cyan-500"
+                  // Touch has no hover: show the slider inline on phones. On sm+
+                  // keep the tidy hover/focus-reveal so it doesn't crowd the bar.
+                  className="ml-1 w-20 opacity-100 transition-all duration-200 accent-cyan-500 sm:w-0 sm:opacity-0 sm:group-hover:w-24 sm:group-hover:opacity-100 sm:focus:w-24 sm:focus:opacity-100"
                 />
               </>
             )}

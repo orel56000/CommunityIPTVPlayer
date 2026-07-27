@@ -207,13 +207,17 @@ export const useChromecast = (
 
   // Relay backend probe: the endpoint answers only from the local relay, and
   // we also learn the LAN origin the Cast device must use for restreams.
+  //
+  // On mobile the WebView loads from the Tauri asset protocol and the relay
+  // base (getRelayBase) is discovered asynchronously, so this can't be a
+  // one-shot on mount — until the base is set, a relative /api/cast/status hits
+  // the asset protocol (HTML, not JSON) and the probe misses. Retry on an
+  // interval until the relay answers with real cast JSON, then stop.
   useEffect(() => {
     let cancelled = false;
-    void (async () => {
-      const status = await relayCastStatus();
-      if (cancelled || !status) return;
-      setRelayCastAvailable(true);
-      if (status.active) setRelayCasting(true);
+    let timer: number | undefined;
+
+    const learnLanOrigin = async () => {
       try {
         const res = await fetch(relayApi("/api/server-info"), { cache: "no-store" });
         if (res.ok) {
@@ -226,9 +230,28 @@ export const useChromecast = (
       } catch {
         /* keep null; live-TV casting will report it */
       }
-    })();
+    };
+
+    const attempt = async (triesLeft: number): Promise<void> => {
+      if (cancelled) return;
+      const status = await relayCastStatus();
+      if (cancelled) return;
+      if (!status) {
+        // Relay not reachable yet (base not set / still starting): retry.
+        if (triesLeft > 0) {
+          timer = window.setTimeout(() => void attempt(triesLeft - 1), 1500);
+        }
+        return;
+      }
+      setRelayCastAvailable(true);
+      if (status.active) setRelayCasting(true);
+      await learnLanOrigin();
+    };
+
+    void attempt(20);
     return () => {
       cancelled = true;
+      if (timer) window.clearTimeout(timer);
     };
   }, []);
 

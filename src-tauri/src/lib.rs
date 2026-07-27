@@ -249,6 +249,18 @@ pub fn run() {
                 tauri::plugin::Builder::<tauri::Wry, ()>::new("installer-noop").build()
             }
         })
+        // Android: Kotlin plugin bridging the Google Cast SDK, so the mobile
+        // build can cast (the relay's /api/cast/* routes proxy to it).
+        .plugin({
+            #[cfg(target_os = "android")]
+            {
+                relay::cast_plugin()
+            }
+            #[cfg(not(target_os = "android"))]
+            {
+                tauri::plugin::Builder::<tauri::Wry, ()>::new("cast-noop").build()
+            }
+        })
         .setup(|app| {
             // Desktop serves the built UI from the relay (mode A: window loads
             // http://127.0.0.1:PORT). Mobile loads the bundled UI via Tauri's
