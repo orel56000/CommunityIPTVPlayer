@@ -1092,7 +1092,10 @@ const App = () => {
               />
             ) : null}
             <VideoPlayer
-              className="min-h-0 flex-1"
+              // Mobile: a normal 16:9 frame at the top with the content list
+              // below (see the sm:hidden panel further down). sm+ keeps the
+              // player filling the column next to the right sidebar.
+              className="aspect-video w-full shrink-0 sm:aspect-auto sm:min-h-0 sm:w-auto sm:flex-1 sm:shrink"
               item={playerState.currentItem}
               autoplay={state.settings.autoplay}
               volume={playerState.volume}
@@ -1135,9 +1138,15 @@ const App = () => {
                 onRetry={() => setConnectionOpen(true)}
               />
             ) : null}
+            {/* Phones: the playlists + details panels sit right under the player
+                (the sm+ right column below carries them otherwise). */}
+            <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden sm:hidden">
+              {playlistsPanel}
+              {detailsPanel}
+            </div>
           </div>
-          {/* Tablet/desktop right column. Hidden on phones — the same panels are
-              in the slide-in menu drawer there. */}
+          {/* Tablet/desktop right column. Hidden on phones — those panels are
+              under the player there. */}
           {state.settings.rightPanelOpen ? (
             <div className="hidden h-full min-h-0 flex-col gap-3 overflow-hidden sm:flex">
               {playlistsPanel}
@@ -1152,8 +1161,6 @@ const App = () => {
         backendStatus={backendConnection.status}
         onOpenBackendConnection={() => setConnectionOpen(true)}
         onOpenSettings={() => openSearch({ category: "settings" })}
-        playlistsPanel={playlistsPanel}
-        detailsPanel={detailsPanel}
       />
       <SearchOverlay
         open={searchOpen}

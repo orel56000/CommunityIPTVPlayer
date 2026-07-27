@@ -1,5 +1,4 @@
 import { ExternalLink, Server, Settings, X } from "lucide-react";
-import type { ReactNode } from "react";
 import clsx from "clsx";
 import { GitHubIcon } from "../shared/GitHubIcon";
 import type { RelayStatus } from "../../utils/relayDiscovery";
@@ -10,9 +9,6 @@ interface MobileMenuProps {
   backendStatus: RelayStatus;
   onOpenBackendConnection: () => void;
   onOpenSettings: () => void;
-  /** The playlists manager and stream-details panels, rendered inside the drawer. */
-  playlistsPanel: ReactNode;
-  detailsPanel: ReactNode;
 }
 
 const statusDot = (status: RelayStatus): string =>
@@ -33,9 +29,9 @@ const statusLabel = (status: RelayStatus): string =>
 
 /**
  * Phone-only slide-in drawer (from the right) that holds the utility actions that
- * used to crowd the header — backend connection, settings, GitHub — plus the
- * playlists and stream-details panels. Hidden on `sm+`, where those live in the
- * header and the right column instead.
+ * used to crowd the header — backend connection, settings, GitHub. Hidden on
+ * `sm+`, where those live in the header. The playlists + details panels sit on
+ * the home screen under the player, not in here.
  */
 export const MobileMenu = ({
   open,
@@ -43,8 +39,6 @@ export const MobileMenu = ({
   backendStatus,
   onOpenBackendConnection,
   onOpenSettings,
-  playlistsPanel,
-  detailsPanel,
 }: MobileMenuProps) => (
   <div className={clsx("fixed inset-0 z-40 sm:hidden", !open && "pointer-events-none")} aria-hidden={!open}>
     <button
@@ -110,11 +104,6 @@ export const MobileMenu = ({
           <span className="flex-1 text-left">GitHub</span>
           <ExternalLink size={14} className="shrink-0 text-slate-500" aria-hidden />
         </a>
-      </div>
-
-      <div className="mt-1 flex min-h-0 flex-1 flex-col gap-3">
-        {playlistsPanel}
-        {detailsPanel}
       </div>
     </div>
   </div>
