@@ -141,3 +141,150 @@ jobs:
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
           files: ${{ matrix.artifacts }}
+
+  # Android: a separate job rather than another matrix entry — it needs a
+  # completely different toolchain (JDK, Android SDK/NDK, a from-source ffmpeg
+  # cross-compile) and none of the desktop matrix's steps apply. Runs
+  # alongside the desktop matrix; softprops/action-gh-release safely accumulates
+  # assets from multiple jobs onto the same tag's release, same as the
+  # matrix entries above already do.
+  build-android:
+    name: Android (arm64)
+    runs-on: ubuntu-latest
+    env:
+      # Must match the NDK version staged under ~/Library/Android/sdk/ndk on the
+      # maintainer's dev machine (see [[android-app-port]] memory) — the Rust
+      # target and the ffmpeg cross-compile both need the exact same toolchain.
+      NDK_VERSION: 26.1.10909125
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # All four ABIs Tauri's default (unrestricted) `android build` targets,
+          # matching what a full local `rustup target add` set already covers.
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+
+      - name: Cache Rust build
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # Explicit SDK setup (cmdline-tools + accepted licenses) rather than
+      # relying on whatever happens to ship on the runner image, so a runner
+      # image change can't silently break this job.
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK
+        run: sdkmanager --install "ndk;${NDK_VERSION}"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Sync version from tag
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: node scripts/set-version.mjs "${GITHUB_REF_NAME#v}"
+
+      - name: Lint
+        run: npm run lint
+
+      # ffmpeg has no Android build of its own to fetch (unlike desktop's
+      # ffmpeg-static sidecar) — it's cross-compiled from source into a real,
+      # executable .so the Rust relay spawns for live-TV transcoding. arm64-v8a
+      # only: real phones/tablets are arm64; x86_64 is emulator-only and not
+      # worth doubling the (slow, from-source) build time for.
+      - name: Install pkg-config
+        run: sudo apt-get update && sudo apt-get install -y pkg-config
+
+      - name: Build ffmpeg sidecar for Android
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/${{ env.NDK_VERSION }}
+        run: npm run android:ffmpeg
+
+      # Optional release signing, mirroring the macOS job's pattern: only
+      # active when the maintainer has added the secrets below. Unlike an
+      # unsigned macOS build (still openable with a Gatekeeper workaround), an
+      # unsigned Android release APK cannot be installed at all — so without
+      # these secrets we build the debug variant instead (auto-signed by
+      # Android's own built-in debug keystore, always installable) rather than
+      # ship a release APK nobody can actually put on a phone.
+      - name: Detect Android signing secrets
+        id: androidsign
+        shell: bash
+        run: echo "enabled=${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}" >> "$GITHUB_OUTPUT"
+
+      - name: Decode Android keystore
+        if: steps.androidsign.outputs.enabled == 'true'
+        shell: bash
+        run: |
+          KEYSTORE_PATH="$PWD/src-tauri/gen/android/release.jks"
+          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > "$KEYSTORE_PATH"
+          cat > src-tauri/gen/android/key.properties <<PROPS
+          storeFile=$KEYSTORE_PATH
+          storePassword=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          keyAlias=${{ secrets.ANDROID_KEY_ALIAS }}
+          keyPassword=${{ secrets.ANDROID_KEY_PASSWORD }}
+          PROPS
+
+      - name: Build signed Android APK (release)
+        if: steps.androidsign.outputs.enabled == 'true'
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/${{ env.NDK_VERSION }}
+        run: npm run android:build
+
+      - name: Note unsigned Android build
+        if: steps.androidsign.outputs.enabled != 'true'
+        shell: bash
+        run: |
+          echo "::notice title=Unsigned Android build::No ANDROID_KEYSTORE_BASE64 secret configured, so a release APK would be unsigned and unable to install on a device. Building the debug variant instead (auto-signed, fully installable, just flagged by Android as a non-Play-Store build). Add the ANDROID_KEYSTORE_BASE64 / ANDROID_KEYSTORE_PASSWORD / ANDROID_KEY_ALIAS / ANDROID_KEY_PASSWORD repo secrets to ship a properly signed release APK."
+
+      - name: Build Android APK (debug fallback)
+        if: steps.androidsign.outputs.enabled != 'true'
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/${{ env.NDK_VERSION }}
+        run: npx tauri android build --apk --debug
+
+      # Match the existing manual-release naming convention exactly (see
+      # [[release-push-flow]] memory) so old and new release assets are
+      # consistent: CommunityIPTVPlayer-X.Y.Z-android-arm64.apk. Located by
+      # search rather than a hardcoded path since the signed/debug branches
+      # above land the APK under different output directories.
+      - name: Locate and rename APK
+        shell: bash
+        run: |
+          SRC="$(find src-tauri/gen/android/app/build/outputs/apk -name '*.apk' | head -1)"
+          test -n "$SRC"
+          VERSION="${GITHUB_REF_NAME#v}"
+          cp "$SRC" "CommunityIPTVPlayer-${VERSION:-dev}-android-arm64.apk"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bundle-android
+          if-no-files-found: error
+          path: CommunityIPTVPlayer-*.apk
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          files: CommunityIPTVPlayer-*.apk
