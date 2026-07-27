@@ -178,14 +178,20 @@ pub fn router(
                 .route_layer(axum::extract::DefaultBodyLimit::max(256 * 1024 * 1024)),
         );
 
-    // Desktop-only endpoints. Native window fullscreen (macOS WKWebView can't use
-    // the element Fullscreen API — enabling it breaks video rendering, so the
-    // frontend pairs CSS fullscreen with this) and native Google Cast
-    // (chrome.cast doesn't exist in WKWebView): discovery, session, transport,
-    // status. Mobile has neither.
+    // Native window fullscreen — desktop only. macOS WKWebView can't use the
+    // element Fullscreen API (enabling it breaks video rendering), so the
+    // frontend pairs CSS fullscreen with this native call. Mobile uses the
+    // element Fullscreen API directly.
     #[cfg(desktop)]
+    let app = app.route("/api/window/fullscreen", post(window_fullscreen));
+
+    // Native Google Cast (discovery, session, transport, status). Desktop speaks
+    // the Cast protocol itself via rust_cast (chrome.cast doesn't exist in
+    // WKWebView); Android proxies these to a Kotlin Cast SDK plugin (the plain
+    // System WebView has no chrome.cast either). Both present the same JSON
+    // contract, so the useChromecast relay backend works on either.
+    #[cfg(any(desktop, target_os = "android"))]
     let app = app
-        .route("/api/window/fullscreen", post(window_fullscreen))
         .route("/api/cast/devices", get(cast_devices))
         .route("/api/cast/start", post(cast_start))
         .route("/api/cast/cmd", post(cast_cmd))
@@ -388,6 +394,113 @@ async fn cast_status(
     let body = match snapshot {
         Some(snap) => serde_json::to_string(&snap).unwrap_or_else(|_| "{}".to_string()),
         None => r#"{"active":false}"#.to_string(),
+    };
+    ([(header::CONTENT_TYPE, "application/json")], body).into_response()
+}
+
+// --- Android native Cast: proxy /api/cast/* to the Kotlin CastPlugin ---------
+//
+// The native cast stack can't run in-process from Rust on Android (no rust_cast
+// / OpenSSL), so a small Kotlin plugin (CastPlugin.kt) drives the Google Cast
+// SDK. Its handle is captured at startup by `cast_plugin()`; the routes below
+// present the exact JSON contract of the desktop handlers above.
+
+#[cfg(target_os = "android")]
+static CAST: std::sync::OnceLock<tauri::plugin::PluginHandle<tauri::Wry>> =
+    std::sync::OnceLock::new();
+
+/// Registers the Kotlin `CastPlugin` and stashes its handle. Add to the Tauri
+/// builder on Android.
+#[cfg(target_os = "android")]
+pub fn cast_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
+    tauri::plugin::Builder::<tauri::Wry, ()>::new("cast")
+        .setup(|_app, api| {
+            let handle = api.register_android_plugin("com.communityiptv.player", "CastPlugin")?;
+            let _ = CAST.set(handle);
+            Ok(())
+        })
+        .build()
+}
+
+#[cfg(target_os = "android")]
+async fn cast_call(command: &str, payload: serde_json::Value) -> Result<serde_json::Value, String> {
+    let handle = CAST.get().ok_or_else(|| "cast plugin not registered".to_string())?;
+    handle
+        .run_mobile_plugin_async::<serde_json::Value>(command, payload)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[cfg(target_os = "android")]
+async fn cast_devices(ConnectInfo(peer): ConnectInfo<SocketAddr>) -> Response {
+    if !peer.ip().is_loopback() {
+        return cors_text(StatusCode::FORBIDDEN, "loopback only".to_string());
+    }
+    let devices = match cast_call("devices", serde_json::json!({})).await {
+        Ok(v) => v.get("devices").cloned().unwrap_or_else(|| serde_json::json!([])),
+        Err(e) => {
+            log::warn!("[cast] devices: {e}");
+            serde_json::json!([])
+        }
+    };
+    (
+        [(header::CONTENT_TYPE, "application/json")],
+        devices.to_string(),
+    )
+        .into_response()
+}
+
+#[cfg(target_os = "android")]
+async fn cast_start(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    axum::Json(body): axum::Json<serde_json::Value>,
+) -> Response {
+    if !peer.ip().is_loopback() {
+        return cors_text(StatusCode::FORBIDDEN, "loopback only".to_string());
+    }
+    match cast_call("start", body).await {
+        Ok(v) if v.get("ok").and_then(serde_json::Value::as_bool).unwrap_or(false) => {
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Ok(v) => cors_text(
+            StatusCode::BAD_GATEWAY,
+            v.get("error")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("Cast failed")
+                .to_string(),
+        ),
+        Err(e) => cors_text(StatusCode::BAD_GATEWAY, e),
+    }
+}
+
+#[cfg(target_os = "android")]
+async fn cast_cmd(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    if !peer.ip().is_loopback() {
+        return cors_text(StatusCode::FORBIDDEN, "loopback only".to_string());
+    }
+    let payload = serde_json::json!({
+        "op": q.get("op").cloned().unwrap_or_default(),
+        "t": q.get("t").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0),
+        "level": q.get("level").and_then(|s| s.parse::<f64>().ok()).unwrap_or(1.0),
+        "muted": q.get("muted").map(|s| s == "true").unwrap_or(false),
+    });
+    match cast_call("cmd", payload).await {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => cors_text(StatusCode::BAD_GATEWAY, e),
+    }
+}
+
+#[cfg(target_os = "android")]
+async fn cast_status(ConnectInfo(peer): ConnectInfo<SocketAddr>) -> Response {
+    if !peer.ip().is_loopback() {
+        return cors_text(StatusCode::FORBIDDEN, "loopback only".to_string());
+    }
+    let body = match cast_call("status", serde_json::json!({})).await {
+        Ok(v) => v.to_string(),
+        Err(_) => r#"{"active":false}"#.to_string(),
     };
     ([(header::CONTENT_TYPE, "application/json")], body).into_response()
 }

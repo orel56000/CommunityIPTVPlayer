@@ -19,3 +19,18 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+
+# --- Google Cast ---------------------------------------------------------
+# CastOptionsProvider is referenced only by its class name in an AndroidManifest
+# meta-data value, so R8 can't see the reference — keep it or Cast init fails in
+# release builds.
+-keep class com.communityiptv.player.CastOptionsProvider { *; }
+
+# --- Tauri mobile plugins ------------------------------------------------
+# Instantiated by class name from Rust (register_android_plugin) and dispatched
+# by reflection, so keep the plugin classes and their @Command methods.
+-keep @app.tauri.annotation.TauriPlugin class * { *; }
+-keepclassmembers class * {
+  @app.tauri.annotation.Command <methods>;
+  @app.tauri.annotation.InvokeArg <fields>;
+}
