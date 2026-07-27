@@ -46,3 +46,11 @@ tauri-plugin-opener = "2"
 tauri = { version = "2.11.2", features = ["tray-icon"] }
 rust_cast = "0.21"
 mdns-sd = "0.20"
+
+# Mobile-only: the relay also serves the frontend build to OTHER devices
+# pairing with this one over the LAN (desktop already does this from a real
+# on-disk `dist/`; mobile's WebView loads its own UI via Tauri's asset
+# protocol instead, so there is no such path to serve from — this embeds the
+# same build into the binary at compile time so `/` still works there).
+[target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
+rust-embed = "8"
