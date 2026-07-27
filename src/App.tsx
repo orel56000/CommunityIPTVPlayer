@@ -1112,6 +1112,8 @@ const App = () => {
               onPlaybackBlockedAction={showBackendRequired}
               nextEpisode={currentNextEpisode}
               onPlayNextEpisode={() => currentNextEpisode && handlePlay(currentNextEpisode)}
+              creditsDetection={state.settings.creditsDetection}
+              creditsAutoNext={state.settings.creditsAutoNext}
             />
             {currentNextEpisode ? (
               <PlayerNavBar

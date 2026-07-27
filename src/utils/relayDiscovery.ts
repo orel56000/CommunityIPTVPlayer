@@ -211,6 +211,23 @@ export const discoverRelay = async (): Promise<boolean> => {
     return true;
   }
 
+  // Same as mode A, but reached over a LAN address rather than
+  // 127.0.0.1/localhost — e.g. another device landed directly on
+  // http://<phone-ip>:11471/, which now also serves the app itself (see
+  // relay.rs's mobile fallback). A relative /health probe on our own origin is
+  // the general form of the loopback check above; probeBackend still verifies
+  // it's actually a ctv-relay before trusting it.
+  if (typeof window !== "undefined" && window.location.port === String(RELAY_PORT)) {
+    try {
+      await probeBackend(window.location.origin, 1200);
+      setRelayBase("");
+      setStatus("available");
+      return true;
+    } catch {
+      /* this port-11471 origin isn't actually a ctv-relay — fall through */
+    }
+  }
+
   try {
     await probeBackend(RELAY_ORIGIN, 1200);
     setRelayBase(RELAY_ORIGIN);

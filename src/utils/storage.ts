@@ -46,6 +46,8 @@ const defaultState: PersistedState = {
     defaultVolume: 0.8,
     rememberedVolume: 0.8,
     volumePercentMode: false,
+    creditsDetection: true,
+    creditsAutoNext: false,
     theme: "dark",
     sidebarCollapsed: false,
     rightPanelOpen: true,
@@ -126,6 +128,14 @@ export const storage = {
             typeof parsed.settings?.volumePercentMode === "boolean"
               ? parsed.settings.volumePercentMode
               : defaultState.settings.volumePercentMode,
+          creditsDetection:
+            typeof parsed.settings?.creditsDetection === "boolean"
+              ? parsed.settings.creditsDetection
+              : defaultState.settings.creditsDetection,
+          creditsAutoNext:
+            typeof parsed.settings?.creditsAutoNext === "boolean"
+              ? parsed.settings.creditsAutoNext
+              : defaultState.settings.creditsAutoNext,
         },
         lastPlayedWatch:
           parsed.lastPlayedWatch &&

@@ -71,6 +71,28 @@ html.light header {
     0 0 24px -8px rgba(34, 211, 238, 0.08);
 }
 
+/* End-credits "up next" suggestion card (CreditsOverlay). */
+.credits-card {
+  animation: credits-card-in 0.24s ease-out;
+}
+
+@keyframes credits-card-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .credits-card {
+    animation: none;
+  }
+}
+
 .search-overlay-root {
   @apply fixed inset-0 z-50 flex items-start justify-center p-3 pt-[max(0.75rem,env(safe-area-inset-top))] sm:p-6 sm:pt-20;
 }

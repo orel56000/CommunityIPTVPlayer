@@ -21,16 +21,19 @@ use axum::{
     routing::{get, post},
     Router,
 };
+// Only the mobile embedded-asset fallback needs the request path.
+#[cfg(not(desktop))]
+use axum::http::Uri;
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::net::{SocketAddr, UdpSocket};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicI64, AtomicU8, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tower_http::cors::CorsLayer;
@@ -41,6 +44,12 @@ const PLAYER_UA: &str = "Mozilla/5.0 (Linux; Android 11) AppleWebKit/537.36 ExoP
 
 /// Idle sessions older than this (no manifest/segment fetch) are reaped.
 const SESSION_TTL: Duration = Duration::from_secs(120);
+
+/// Rolling window for the per-host request-rate count that appears in the
+/// flight-recorder logs as `(N reqs/10s)` — the fastest way to tell a genuine
+/// provider-side rate limit from a client-side burst (e.g. a non-fast-start MP4
+/// forcing the video element to bounce around the file hunting for its moov atom).
+const REQUEST_RATE_WINDOW: Duration = Duration::from_secs(10);
 
 // ---------------------------------------------------------------------------
 // Shared state
@@ -57,6 +66,11 @@ pub struct RelayState {
     /// Per-session-id async locks, to serialize "start ffmpeg" for one URL
     /// without blocking other sessions or segment reads.
     starting: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    /// Recent request timestamps per host (VOD fetches and ffmpeg spawns alike),
+    /// used only to compute the `(N reqs/10s)` burst count in logs — see
+    /// `note_request`. One entry per distinct host ever seen; fine in practice
+    /// since a session only ever talks to a handful of provider hosts.
+    request_log: Arc<Mutex<HashMap<String, VecDeque<Instant>>>>,
     /// NVENC (NVIDIA GPU H.264 encode) availability, probed once: 0=unknown,
     /// 1=available, 2=unavailable. Lets heavy (4K/HEVC) transcodes run on the
     /// GPU in real time instead of choking libx264 on the CPU.
@@ -91,6 +105,7 @@ impl RelayState {
             ffmpeg: Arc::new(ffmpeg),
             sessions: Arc::new(Mutex::new(HashMap::new())),
             starting: Arc::new(Mutex::new(HashMap::new())),
+            request_log: Arc::new(Mutex::new(HashMap::new())),
             nvenc: Arc::new(AtomicU8::new(0)),
             backup_dir: backup_dir.map(Arc::new),
             #[cfg(desktop)]
@@ -105,6 +120,10 @@ struct Session {
     output_dir: PathBuf,
     child: Mutex<Child>,
     last_access: AtomicI64,
+    /// Provider host this session's ffmpeg is reading from — logged when the
+    /// session stops, so `invalidate`/`reap_idle` can report which connection
+    /// just closed.
+    host: String,
 }
 
 impl Session {
@@ -121,6 +140,96 @@ fn now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+/// Record one outbound request to `host` and return how many (including this
+/// one) landed within the last `REQUEST_RATE_WINDOW` — surfaced in logs as
+/// `(N reqs/10s)`. Only called at genuine outbound-to-provider events (a VOD
+/// byte fetch, or an ffmpeg spawn for live) — never for requests served from an
+/// already-open session, which don't touch the provider again.
+async fn note_request(state: &RelayState, host: &str) -> usize {
+    let mut log = state.request_log.lock().await;
+    let now = Instant::now();
+    let entry = log.entry(host.to_string()).or_insert_with(VecDeque::new);
+    entry.push_back(now);
+    while matches!(entry.front(), Some(t) if now.duration_since(*t) > REQUEST_RATE_WINDOW) {
+        entry.pop_front();
+    }
+    entry.len()
+}
+
+/// Provider host for a source url, used only for logging (never the full URL —
+/// credentials live in the query string).
+fn host_of(url_str: &str) -> String {
+    url::Url::parse(url_str)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string))
+        .unwrap_or_else(|| "?".to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Mobile fallback: serve the frontend build embedded in the binary
+// ---------------------------------------------------------------------------
+//
+// Mobile's WebView loads the UI via Tauri's own asset protocol, not this
+// server (see the `web_dir: None` branch in `router` below), so unlike desktop
+// there is no on-disk `dist/` to hand to `ServeDir` — Android's APK assets
+// aren't reachable as a plain filesystem path without an extra extraction
+// step. But another device pairing with this one as a backend (Settings →
+// Backend connection → paste this phone's LAN address) should land on a
+// working app at `/`, not a 404 — and once it does, its own relative
+// `/api/*` calls are naturally same-origin to this same relay, exactly like
+// desktop's own window loading from 127.0.0.1 (see `discoverRelay` in
+// relayDiscovery.ts). Embedding the build at compile time sidesteps the APK
+// asset problem entirely — no runtime extraction, nothing to go stale.
+
+#[cfg(not(desktop))]
+#[derive(rust_embed::RustEmbed)]
+#[folder = "../dist"]
+struct WebAssets;
+
+#[cfg(not(desktop))]
+fn asset_mime(path: &str) -> &'static str {
+    match path.rsplit('.').next().unwrap_or("") {
+        "html" => "text/html; charset=utf-8",
+        "js" => "text/javascript; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "json" => "application/json",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "ico" => "image/x-icon",
+        "webmanifest" => "application/manifest+json",
+        "woff2" => "font/woff2",
+        _ => "application/octet-stream",
+    }
+}
+
+#[cfg(not(desktop))]
+async fn serve_embedded_asset(uri: Uri) -> Response {
+    let path = uri.path().trim_start_matches('/');
+    let (served_path, file) = match WebAssets::get(path) {
+        Some(file) => (path, file),
+        // SPA fallback: `/`, and any client-side route, gets index.html —
+        // mirrors ServeDir::fallback(ServeFile::new(index)) on desktop.
+        None => match WebAssets::get("index.html") {
+            Some(file) => ("index.html", file),
+            None => return cors_text(StatusCode::NOT_FOUND, "Frontend build missing".to_string()),
+        },
+    };
+    // Vite content-hashes every asset filename except index.html itself.
+    let cache_control = if served_path == "index.html" {
+        "no-store"
+    } else {
+        "public, max-age=31536000, immutable"
+    };
+    (
+        [
+            (header::CONTENT_TYPE, asset_mime(served_path)),
+            (header::CACHE_CONTROL, cache_control),
+        ],
+        file.data.into_owned(),
+    )
+        .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -204,7 +313,14 @@ pub fn router(
         let index = dir.join("index.html");
         app.fallback_service(ServeDir::new(dir).fallback(ServeFile::new(index)))
     } else {
-        app
+        #[cfg(not(desktop))]
+        {
+            app.fallback(serve_embedded_asset)
+        }
+        #[cfg(desktop)]
+        {
+            app
+        }
     };
 
     // Permissive CORS so the deployed HTTPS site can call this loopback relay
@@ -778,14 +894,16 @@ async fn stream(
         .and_then(|s| s.last())
         .unwrap_or("?")
         .to_string();
-    let started = std::time::Instant::now();
+    let started = Instant::now();
+    let burst = note_request(&state, &host).await;
 
     let upstream = match req.send().await {
         Ok(r) => r,
         Err(e) => {
             log::warn!(
-                "[stream] FAIL host={host} file={file} after {}ms: {e}",
-                started.elapsed().as_millis()
+                "[stream] FAIL host={host} file={file} after {}ms ({burst} reqs/{}s): {e}",
+                started.elapsed().as_millis(),
+                REQUEST_RATE_WINDOW.as_secs()
             );
             return cors_text(
                 StatusCode::BAD_GATEWAY,
@@ -802,14 +920,15 @@ async fn stream(
         .unwrap_or("-")
         .to_string();
     log::info!(
-        "[stream] {} host={host} file={file} type={content_type:?} len={:?} in {}ms",
+        "[stream] {} host={host} file={file} type={content_type:?} len={:?} in {}ms ({burst} reqs/{}s)",
         status.as_u16(),
         upstream
             .headers()
             .get(header::CONTENT_LENGTH)
             .and_then(|v| v.to_str().ok())
             .unwrap_or("-"),
-        started.elapsed().as_millis()
+        started.elapsed().as_millis(),
+        REQUEST_RATE_WINDOW.as_secs()
     );
 
     let path_lower = target.path().to_ascii_lowercase();
@@ -1324,6 +1443,13 @@ async fn run_ffmpeg_session(
         StartError::Failed(format!("could not start ffmpeg ({}): {e}", state.ffmpeg.display()))
     })?;
 
+    let host = host_of(source_url);
+    let burst = note_request(state, &host).await;
+    log::info!(
+        "[restream] spawning ffmpeg host={host} mode={mode:?} nvenc={use_nvenc} ({burst} reqs/{}s)",
+        REQUEST_RATE_WINDOW.as_secs()
+    );
+
     // Drain stderr: keep a tail for error messages AND parse the input dump to
     // learn the source codecs (for the copy-vs-transcode decision).
     let stderr_tail = Arc::new(Mutex::new(String::new()));
@@ -1429,6 +1555,7 @@ async fn run_ffmpeg_session(
                         output_dir,
                         child: Mutex::new(child),
                         last_access: AtomicI64::new(now_ms()),
+                        host: host.clone(),
                     });
                     state
                         .sessions
@@ -1473,6 +1600,7 @@ async fn is_healthy(session: &Arc<Session>) -> bool {
 async fn invalidate(state: &RelayState, id: &str) {
     let removed = state.sessions.lock().await.remove(id);
     if let Some(session) = removed {
+        log::info!("[restream] stopping session host={} id={id}", session.host);
         let _ = session.child.lock().await.start_kill();
         let _ = tokio::fs::remove_dir_all(&session.output_dir).await;
     }
@@ -1570,6 +1698,7 @@ async fn reap_idle(sessions: &Arc<Mutex<HashMap<String, Arc<Session>>>>) {
     for id in to_remove {
         let removed = sessions.lock().await.remove(&id);
         if let Some(session) = removed {
+            log::info!("[restream] idle timeout host={} id={id}", session.host);
             let _ = session.child.lock().await.start_kill();
             let _ = tokio::fs::remove_dir_all(&session.output_dir).await;
         }

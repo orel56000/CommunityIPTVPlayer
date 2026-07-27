@@ -18,6 +18,10 @@ export interface AppSettings {
   rememberedVolume: number;
   /** When true, player shows % and a numeric field plus a compact slider. */
   volumePercentMode: boolean;
+  /** Suggest the next episode when the end credits are detected. */
+  creditsDetection: boolean;
+  /** With that suggestion up, auto-advance after a cancellable countdown. */
+  creditsAutoNext: boolean;
   theme: "dark" | "light";
   sidebarCollapsed: boolean;
   rightPanelOpen: boolean;
