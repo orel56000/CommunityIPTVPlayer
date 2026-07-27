@@ -2,13 +2,25 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import clsx from "clsx";
 import Hls from "hls.js";
 import mpegts from "mpegts.js";
+import type { CreditsFeedbackRecord } from "../../types/credits";
 import type { EpisodeItem, PlaylistItem } from "../../types/models";
 import { useChromecast } from "../../hooks/useChromecast";
+import { useCreditsDetection } from "../../hooks/useCreditsDetection";
+import { DEFAULT_CREDITS_CONFIG } from "../../utils/creditsDetection";
+import {
+  creditsContentId,
+  creditsGroupId,
+  getLearnedMarkers,
+  parseMarkersFromItem,
+  recordCreditsFeedback,
+} from "../../utils/creditsMarkers";
 import { downloadMediaFile, isHlsUrl } from "../../utils/downloadStream";
 import { categoryForSection, writeHttpsCapability } from "../../utils/httpsCapability";
 import { servedByLocalRelay } from "../../utils/relayDiscovery";
 import { toRelayUrl } from "../../utils/secureUrl";
 import { buildLivePlaybackAttempts, toXtreamTsUrl } from "../../utils/xtreamStreamUrl";
+import { CreditsDebugPanel } from "./CreditsDebugPanel";
+import { CreditsOverlay } from "./CreditsOverlay";
 import { PlayerOverlay } from "./PlayerOverlay";
 
 interface VideoPlayerProps {
@@ -29,6 +41,10 @@ interface VideoPlayerProps {
   /** Next episode in the series (null for non-series or the last episode). */
   nextEpisode?: EpisodeItem | null;
   onPlayNextEpisode?: () => void;
+  /** Suggest the next episode once the end credits are detected. */
+  creditsDetection?: boolean;
+  /** With the suggestion up, auto-advance after a cancellable countdown. */
+  creditsAutoNext?: boolean;
   className?: string;
 }
 
@@ -39,6 +55,8 @@ const clampVideoZoom = (value: number): number =>
   Math.min(VIDEO_ZOOM_MAX, Math.max(VIDEO_ZOOM_MIN, Math.round(value * 100) / 100));
 
 const CONTROLS_HIDE_MS = 2400;
+/** Cancellable auto-advance delay once credits are detected (opt-in setting). */
+const CREDITS_COUNTDOWN_SEC = 10;
 const SOURCE_STARTUP_TIMEOUT_MS = 12000;
 const MPEGTS_STARTUP_TIMEOUT_MS = 25000;
 // ffmpeg needs time to spawn and produce the first HLS segments.
@@ -338,6 +356,8 @@ export const VideoPlayer = ({
   onPlaybackBlockedAction,
   nextEpisode = null,
   onPlayNextEpisode,
+  creditsDetection = true,
+  creditsAutoNext = false,
   className,
 }: VideoPlayerProps) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -347,6 +367,9 @@ export const VideoPlayer = ({
   const audioContextRef = useRef<AudioContext | null>(null);
   const mediaSourceRef = useRef<MediaElementAudioSourceNode | null>(null);
   const gainNodeRef = useRef<GainNode | null>(null);
+  // Analysis-only tap off the gain node, used by the credits detector. Never
+  // connected to the destination, so it cannot affect what the user hears.
+  const analyserRef = useRef<AnalyserNode | null>(null);
   const audioGraphFailedRef = useRef(false);
   const switchingSourceRef = useRef(false);
   const hasAppliedResumeRef = useRef(false);
@@ -484,6 +507,15 @@ export const VideoPlayer = ({
         mediaSourceRef.current.connect(gainNodeRef.current);
         gainNodeRef.current.connect(audioContextRef.current.destination);
       }
+      if (!analyserRef.current) {
+        // Side-chain only: gain still feeds the destination directly, and the
+        // analyser's own output goes nowhere.
+        const analyser = audioContextRef.current.createAnalyser();
+        analyser.fftSize = 1024;
+        analyser.smoothingTimeConstant = 0.5;
+        gainNodeRef.current.connect(analyser);
+        analyserRef.current = analyser;
+      }
       return true;
     } catch {
       audioGraphFailedRef.current = true;
@@ -533,6 +565,105 @@ export const VideoPlayer = ({
     () => !Number.isFinite(displayDuration) || displayDuration <= 0,
     [displayDuration],
   );
+
+  /* --------------------------------------------------- end-credits detection */
+
+  // Marker sources, in the order resolveMarkerCreditsStart applies them: the
+  // playlist/provider can ship exact timestamps per item, and past behaviour on
+  // this device can teach a series-wide one. Either short-circuits the
+  // heuristic entirely (see docs/credits-detection.md).
+  const creditsMarkers = useMemo(
+    () =>
+      item
+        ? {
+            backend: parseMarkersFromItem(item),
+            learned: getLearnedMarkers(creditsGroupId(item), duration),
+          }
+        : null,
+    [item, duration],
+  );
+  const creditsConfig = useMemo(() => ({ debug: import.meta.env.DEV }), []);
+
+  const credits = useCreditsDetection({
+    videoRef,
+    analyserRef,
+    duration,
+    isLive: isLive || item?.section === "live",
+    // Casting moves playback off this element entirely — nothing to measure.
+    enabled: creditsDetection && Boolean(item) && !isCasting,
+    contentKey: item?.id ?? null,
+    markers: creditsMarkers,
+    config: creditsConfig,
+  });
+
+  const { creditsDetected, detectedAt: creditsDetectedAt, dismissed: creditsDismissed, dismiss: dismissCredits } =
+    credits;
+  const showCreditsSuggestion = creditsDetected && !creditsDismissed && Boolean(nextEpisode) && !isCasting;
+
+  const recordCredits = useCallback(
+    (update: Partial<CreditsFeedbackRecord>) => {
+      if (!item) return;
+      const contentId = creditsContentId(item);
+      const groupId = creditsGroupId(item);
+      const durationSec = videoRef.current?.duration ?? duration;
+      if (!contentId || !groupId || !Number.isFinite(durationSec) || durationSec <= 0) return;
+      recordCreditsFeedback({ ...update, contentId, groupId, durationSec });
+    },
+    [duration, item],
+  );
+
+  // Anonymous, local-only: what was detected, what the user did about it, and
+  // whether the episode ran to the end. Aggregated by getLearnedMarkers.
+  useEffect(() => {
+    if (!creditsDetected || creditsDetectedAt == null) return;
+    recordCredits({ detectedCreditsStart: creditsDetectedAt });
+  }, [creditsDetected, creditsDetectedAt, recordCredits]);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !item) return;
+    const onEndedFeedback = () => recordCredits({ reachedVideoEnd: true });
+    video.addEventListener("ended", onEndedFeedback);
+    return () => video.removeEventListener("ended", onEndedFeedback);
+  }, [item, recordCredits]);
+
+  const [creditsCountdown, setCreditsCountdown] = useState<number | null>(null);
+  const [countdownCancelled, setCountdownCancelled] = useState(false);
+
+  useEffect(() => {
+    setCountdownCancelled(false);
+    setCreditsCountdown(null);
+  }, [item?.id]);
+
+  const handleCreditsPlayNext = useCallback(() => {
+    recordCredits({ userSkippedAt: videoRef.current?.currentTime ?? null });
+    setCreditsCountdown(null);
+    onPlayNextEpisode?.();
+  }, [onPlayNextEpisode, recordCredits]);
+
+  const handleCreditsDismiss = useCallback(() => {
+    recordCredits({ userDismissed: true });
+    setCountdownCancelled(true);
+    setCreditsCountdown(null);
+    dismissCredits();
+  }, [dismissCredits, recordCredits]);
+
+  useEffect(() => {
+    if (!showCreditsSuggestion || !creditsAutoNext || countdownCancelled) {
+      setCreditsCountdown(null);
+      return;
+    }
+    setCreditsCountdown(CREDITS_COUNTDOWN_SEC);
+    const timer = window.setInterval(() => {
+      setCreditsCountdown((remaining) => (remaining == null ? null : remaining - 1));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [countdownCancelled, creditsAutoNext, showCreditsSuggestion]);
+
+  useEffect(() => {
+    if (creditsCountdown == null || creditsCountdown > 0) return;
+    handleCreditsPlayNext();
+  }, [creditsCountdown, handleCreditsPlayNext]);
 
   // Controls auto-hide only while genuinely playing; the scheduled hide reads
   // this ref so a stale timer can't hide the bar while paused/loading/errored.
@@ -1192,6 +1323,14 @@ export const VideoPlayer = ({
         hlsRef.current = null;
       }
       destroyMpegTsPlayer();
+      if (analyserRef.current) {
+        try {
+          analyserRef.current.disconnect();
+        } catch {
+          // no-op
+        }
+        analyserRef.current = null;
+      }
       if (gainNodeRef.current) {
         try {
           gainNodeRef.current.disconnect();
@@ -1652,6 +1791,27 @@ export const VideoPlayer = ({
               : () => setRetryNonce((nonce) => nonce + 1)
           }
         />
+        <CreditsOverlay
+          visible={showCreditsSuggestion}
+          nextEpisodeLabel={
+            nextEpisode ? `S${nextEpisode.season ?? 0}E${nextEpisode.episode ?? 0} · ${nextEpisode.title}` : null
+          }
+          countdownSeconds={creditsCountdown}
+          countdownTotalSeconds={CREDITS_COUNTDOWN_SEC}
+          onPlayNext={handleCreditsPlayNext}
+          onDismiss={handleCreditsDismiss}
+          onCancelCountdown={() => {
+            setCountdownCancelled(true);
+            setCreditsCountdown(null);
+          }}
+        />
+        {import.meta.env.DEV ? (
+          <CreditsDebugPanel
+            result={credits}
+            triggerScore={DEFAULT_CREDITS_CONFIG.triggerScore}
+            requiredConsecutiveSamples={DEFAULT_CREDITS_CONFIG.requiredConsecutiveSamples}
+          />
+        ) : null}
       </div>
     </div>
   );

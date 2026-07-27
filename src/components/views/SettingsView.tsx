@@ -57,6 +57,28 @@ export const SettingsView = ({
       />
     </label>
     <label className="flex min-w-0 items-center justify-between gap-4 text-sm">
+      <span>Suggest next episode during credits</span>
+      <input
+        type="checkbox"
+        checked={settings.creditsDetection}
+        onChange={(event) => onUpdate({ ...settings, creditsDetection: event.target.checked })}
+      />
+    </label>
+    <p className="text-xs text-slate-500">
+      Near the end of an episode the player watches for credits (dark, still frames; music without dialogue) and offers
+      the next episode. Everything is measured on this device — nothing is uploaded.
+    </p>
+    {settings.creditsDetection ? (
+      <label className="flex min-w-0 items-center justify-between gap-4 text-sm">
+        <span>Play the next episode automatically after 10s</span>
+        <input
+          type="checkbox"
+          checked={settings.creditsAutoNext}
+          onChange={(event) => onUpdate({ ...settings, creditsAutoNext: event.target.checked })}
+        />
+      </label>
+    ) : null}
+    <label className="flex min-w-0 items-center justify-between gap-4 text-sm">
       <span>Collapsed sidebar</span>
       <input
         type="checkbox"

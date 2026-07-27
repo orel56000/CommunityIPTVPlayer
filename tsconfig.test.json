@@ -1,0 +1,14 @@
+{
+  // Unit tests run on Node's built-in test runner (`npm test`), so they need
+  // the node types and ES2022 lib that the browser app does not. They only ever
+  // cover the pure logic in src/utils + src/types — UI components are not
+  // type-checked here, they are covered by tsconfig.app.json.
+  "extends": "./tsconfig.app.json",
+  "compilerOptions": {
+    "composite": true,
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": ["node", "chrome", "chromecast-caf-sender"]
+  },
+  "include": ["src/**/*.test.ts", "src/utils/**/*.ts", "src/types/**/*.ts"]
+}
