@@ -122,7 +122,12 @@ const App = () => {
       } else {
         window.open(target, "_blank", "noopener");
       }
-    } catch {
+    } catch (error) {
+      // The desktop window loads http://127.0.0.1:11471 (WebviewUrl::External),
+      // which Tauri's ACL treats as remote content — capabilities/default.json's
+      // `remote.urls` is what grants it the opener permissions. If that ever
+      // regresses, surface it instead of failing silently.
+      console.error("[IPTV][Update] openUrl failed", error);
       window.open(updateInfo.releaseUrl, "_blank", "noopener");
     } finally {
       setUpdateBusy(false);
