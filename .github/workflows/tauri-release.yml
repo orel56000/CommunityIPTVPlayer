@@ -19,12 +19,15 @@ jobs:
   build:
     name: ${{ matrix.label }}
     runs-on: ${{ matrix.os }}
-    # A macos-13 (Intel) run has been observed queuing for a full 24h with no
-    # runner ever assigned (steps: [] in the job API — GitHub simply never had
-    # capacity), silently burning a day before anyone noticed. Bound every
-    # platform to a sane ceiling so a repeat fails loudly within the hour
-    # instead of hanging; fail-fast: false means the other platforms still
-    # build and publish normally regardless.
+    # macos-13 (Intel) was observed queuing for a full 24h with no runner ever
+    # assigned (steps: [] in the job API) — it was fully deprecated/unsupported
+    # by GitHub on 2025-12-08 (github.blog/changelog/2025-09-19-...), so it
+    # simply never had capacity again. macos-15-intel is the documented
+    # replacement (supported until 2027-08). timeout-minutes is kept as a
+    # general safety net, but note it bounds execution time once a runner is
+    # assigned — it would NOT by itself have caught a job that never gets one;
+    # fail-fast: false means one platform failing/timing out doesn't block the
+    # others from building and publishing normally.
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -41,7 +44,7 @@ jobs:
             platform: macos-arm64
             artifacts: |
               src-tauri/target/release/bundle/dmg/*.dmg
-          - os: macos-13
+          - os: macos-15-intel
             label: macOS (Intel)
             platform: macos-x64
             artifacts: |
