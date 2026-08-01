@@ -128,17 +128,32 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: npm run tauri:build
 
-      - name: Note unsigned macOS build
+      - name: Note un-notarized macOS build
         if: runner.os == 'macOS' && steps.macsign.outputs.enabled != 'true'
         shell: bash
         run: |
-          echo "::notice title=Unsigned macOS build::No Apple signing secrets configured, so this DMG is unsigned. It works, but after downloading users must clear quarantine once with: xattr -cr '/Applications/Community IPTV Player.app'. Add the APPLE_* repo secrets to enable notarization."
+          echo "::notice title=Un-notarized macOS build::No Apple signing secrets configured, so this DMG is only ad-hoc signed and not notarized. It works, but after downloading users must clear quarantine once with: xattr -dr com.apple.quarantine '/Applications/Community IPTV Player.app' (documented in the README's macOS Gatekeeper Warning section). Add the APPLE_* repo secrets to enable notarization."
 
       # Windows, Linux, and the unsigned macOS fallback. Runs
       # scripts/prepare-tauri-sidecars.mjs (per-platform ffmpeg via ffmpeg-static)
       # then `tauri build`.
+      #
+      # APPLE_SIGNING_IDENTITY=- is codesign's ad-hoc identity, which seals the
+      # bundle with no Apple account, certificate, or keychain involved: the
+      # bundler's certificate-import path runs only when APPLE_CERTIFICATE is
+      # set, and notarization only when APPLE_ID is, so neither is triggered
+      # here. It has to be handed to the bundler rather than run as a later
+      # step, because the bundler signs the .app *before* copying it into the
+      # DMG — a `codesign` afterwards would leave the copy that actually ships
+      # untouched. This does NOT remove the Gatekeeper warning (ad-hoc is not
+      # notarization; see the README's macOS section), it only means the
+      # shipped bundle carries a valid seal instead of no signature at all,
+      # which keeps it clear of the harsher "app is damaged and can't be
+      # opened" rejection. The Windows and Linux bundlers never read it.
       - name: Build Tauri bundles
         if: runner.os != 'macOS' || steps.macsign.outputs.enabled != 'true'
+        env:
+          APPLE_SIGNING_IDENTITY: "-"
         run: npm run tauri:build
 
       # Tauri's bundler names files from productName + version + arch/locale

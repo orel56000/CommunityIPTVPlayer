@@ -123,16 +123,44 @@ npm run tauri:build
 
 The ffmpeg sidecar is prepared from the `ffmpeg-static` npm package into `src-tauri/binaries/` before the Tauri build. That directory is intentionally ignored by Git because the binary is large and platform-specific.
 
+## Downloading A Release Build
+
+Prebuilt bundles for every tagged version are published on the [Releases page](https://github.com/orel56000/CommunityIPTVPlayer/releases), named `ctv_<version>_<platform>.<ext>`:
+
+| Platform | Asset |
+| --- | --- |
+| macOS (Apple Silicon) | `ctv_<version>_macos-arm64.dmg` |
+| macOS (Intel) | `ctv_<version>_macos-x64.dmg` |
+| Windows | `ctv_<version>_windows.msi` or `ctv_<version>_windows.exe` |
+| Linux | `ctv_<version>_linux.deb`, `ctv_<version>_linux.rpm`, or `ctv_<version>_linux.AppImage` |
+| Android | `ctv_<version>_android-arm64.apk` |
+
+On an Apple Silicon Mac, take the `macos-arm64` build. The `macos-x64` one still runs, through Rosetta, but transcoding is noticeably slower.
+
+## macOS Gatekeeper Warning
+
+The macOS builds are not signed with an Apple Developer ID, so the first launch of a downloaded copy is blocked by Gatekeeper with *"Community IPTV Player" Not Opened — Apple could not verify "Community IPTV Player" is free of malware*. The dialog offers only **Move to Trash** and **Done**, and since macOS 15 the old Control-click → Open bypass no longer applies to it.
+
+Drag the app to `/Applications`, then clear the download quarantine flag once:
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/Community IPTV Player.app"
+```
+
+The app opens normally after that, on that launch and every one after it.
+
+That warning is Gatekeeper declining to vouch for an application it cannot trace to a registered developer, not a report that anything was found in it. Removing it for real requires notarizing each build with Apple, which in turn requires a paid Apple Developer Program membership. The release workflow already signs and notarizes automatically whenever the `APPLE_SIGNING_IDENTITY`, `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_ID`, `APPLE_PASSWORD`, and `APPLE_TEAM_ID` repository secrets are present, and falls back to an unsigned build when they are not. Adding those secrets is all it takes for this step to stop being necessary.
+
 ## Release
 
-GitHub Actions builds the Windows desktop app automatically.
+GitHub Actions builds the desktop and Android apps automatically.
 
 ```bash
 git tag v0.1.0
 git push origin v0.1.0
 ```
 
-Pushing a `v*` tag creates a GitHub Release with the generated `.msi`, setup `.exe`, and standalone desktop `.exe`. The workflow can also be run manually from the Actions tab to produce downloadable build artifacts without publishing a release.
+Pushing a `v*` tag creates a GitHub Release carrying every bundle listed under [Downloading A Release Build](#downloading-a-release-build): Windows `.msi` and setup `.exe`, macOS `.dmg` for both architectures, Linux `.deb`, `.rpm`, and `.AppImage`, and the Android `.apk`. The workflow can also be run manually from the Actions tab to produce downloadable build artifacts without publishing a release.
 
 ## Usage
 
