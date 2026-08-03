@@ -184,6 +184,13 @@ jobs:
           if-no-files-found: error
           path: release-assets/*
 
+      # body_path is set here AND on the Android job below, deliberately. Every
+      # job in this workflow publishes to the same tag's release, so whichever
+      # runs last wins the body — pointing all of them at the same checked-in
+      # file makes that race harmless instead of leaving the notes empty (which
+      # is what every release through v0.9.4 shipped with) depending on finish
+      # order. The file explains the macOS Gatekeeper block, which downloaders
+      # need at exactly this moment and would otherwise only find in the README.
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
@@ -191,6 +198,7 @@ jobs:
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
           files: release-assets/*
+          body_path: .github/release-notes.md
 
   # Android: a separate job rather than another matrix entry — it needs a
   # completely different toolchain (JDK, Android SDK/NDK, a from-source ffmpeg
@@ -332,6 +340,7 @@ jobs:
           if-no-files-found: error
           path: release-assets/*
 
+      # Same body_path as the desktop matrix above — see the note there.
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
@@ -339,3 +348,4 @@ jobs:
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
           files: release-assets/*
+          body_path: .github/release-notes.md
