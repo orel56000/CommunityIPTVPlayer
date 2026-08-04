@@ -27,12 +27,16 @@ const SERVICE: &str = "_googlecast._tcp.local.";
 #[derive(Serialize, Clone)]
 pub struct CastDeviceInfo {
     pub name: String,
+    /// Hardware model ("Chromecast Ultra", "Google Nest Hub"), when advertised.
+    /// Shown in the picker so two TVs with similar names stay tellable apart.
+    pub model: Option<String>,
     pub host: String,
     pub port: u16,
 }
 
 /// Browse mDNS for Google Cast devices for `timeout` (blocking; call from
-/// spawn_blocking). The friendly name lives in the `fn` TXT record.
+/// spawn_blocking). The friendly name lives in the `fn` TXT record, the model
+/// name in `md`.
 pub fn discover(timeout: Duration) -> Vec<CastDeviceInfo> {
     let mut out: Vec<CastDeviceInfo> = Vec::new();
     let Ok(daemon) = ServiceDaemon::new() else {
@@ -55,12 +59,16 @@ pub fn discover(timeout: Duration) -> Vec<CastDeviceInfo> {
                     .unwrap_or_else(|| {
                         info.get_fullname().split('.').next().unwrap_or("Chromecast").to_string()
                     });
+                let model = info
+                    .get_property_val_str("md")
+                    .map(str::to_string)
+                    .filter(|value| !value.is_empty());
                 let Some(ip) = info.get_addresses().iter().find(|a| a.is_ipv4()) else {
                     continue;
                 };
                 let host = ip.to_string();
                 if !out.iter().any(|d| d.host == host) {
-                    out.push(CastDeviceInfo { name, host, port: info.get_port() });
+                    out.push(CastDeviceInfo { name, model, host, port: info.get_port() });
                 }
             }
             Ok(_) => {}

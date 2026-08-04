@@ -461,7 +461,10 @@ export const VideoPlayer = ({
     castMuteToggle,
     canCast,
     castDevices,
-    castToDevice,
+    pendingCastDevice,
+    selectCastDevice,
+    confirmCastDevice,
+    dismissCastConfirm,
     cancelCastPicker,
   } = useChromecast(item, onCastProgress);
 
@@ -1750,7 +1753,10 @@ export const VideoPlayer = ({
           canPip={canPip}
           canCast={canCast}
           castDevices={castDevices}
-          onPickCastDevice={(device) => void castToDevice(device)}
+          pendingCastDevice={pendingCastDevice}
+          onPickCastDevice={selectCastDevice}
+          onConfirmCastDevice={() => void confirmCastDevice()}
+          onDismissCastConfirm={dismissCastConfirm}
           onCancelCastPicker={cancelCastPicker}
           castActive={isCasting}
           castDeviceLabel={deviceName}

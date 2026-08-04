@@ -67,6 +67,8 @@ const emptyMirror: CastMirrorState = {
 
 export interface RelayCastDevice {
   name: string;
+  /** Hardware model from the mDNS `md` record, when the device advertises one. */
+  model?: string | null;
   host: string;
   port: number;
 }
@@ -146,6 +148,7 @@ export const useChromecast = (
   const [relayCastAvailable, setRelayCastAvailable] = useState(false);
   const [relayCasting, setRelayCasting] = useState(false);
   const [castDevices, setCastDevices] = useState<RelayCastDevice[] | null>(null);
+  const [pendingCastDevice, setPendingCastDevice] = useState<RelayCastDevice | null>(null);
   const [pickerBusy, setPickerBusy] = useState(false);
   const lanOriginRef = useRef<string | null>(null);
   const lastDeviceRef = useRef<RelayCastDevice | null>(null);
@@ -398,6 +401,7 @@ export const useChromecast = (
     async (device: RelayCastDevice) => {
       const current = itemRef.current;
       setCastDevices(null);
+      setPendingCastDevice(null);
       if (!current) return;
       setCastMessage(null);
       lastDeviceRef.current = device;
@@ -409,7 +413,27 @@ export const useChromecast = (
     [relayCastLoad],
   );
 
-  const cancelCastPicker = useCallback(() => setCastDevices(null), []);
+  /** Step 1 of the picker: hold the chosen device for an explicit confirmation
+   * rather than casting straight away. Casting takes over someone's TV, so it
+   * never happens off a single click. */
+  const selectCastDevice = useCallback((device: RelayCastDevice) => {
+    setPendingCastDevice(device);
+  }, []);
+
+  /** Step 2: the user confirmed the device held by `selectCastDevice`. */
+  const confirmCastDevice = useCallback(async () => {
+    const device = pendingCastDevice;
+    if (!device) return;
+    await castToDevice(device);
+  }, [pendingCastDevice, castToDevice]);
+
+  /** Back out of the confirmation, leaving the device list up. */
+  const dismissCastConfirm = useCallback(() => setPendingCastDevice(null), []);
+
+  const cancelCastPicker = useCallback(() => {
+    setCastDevices(null);
+    setPendingCastDevice(null);
+  }, []);
 
   // Load the new item on the active session when the user switches content.
   useEffect(() => {
@@ -476,9 +500,11 @@ export const useChromecast = (
       setCastMessage(null);
       if (!devices.length) {
         setCastMessage("No Cast devices found on your network.");
-      } else if (devices.length === 1) {
-        await castToDevice(devices[0]);
       } else {
+        // Always open the picker, including for a single discovered device.
+        // Auto-casting to "the only one found" meant one click could throw
+        // playback onto whichever TV happened to answer mDNS first.
+        setPendingCastDevice(null);
         setCastDevices(devices);
       }
     } catch {
@@ -486,7 +512,7 @@ export const useChromecast = (
     } finally {
       setPickerBusy(false);
     }
-  }, [sdkReady, relayCastAvailable, pickerBusy, castToDevice]);
+  }, [sdkReady, relayCastAvailable, pickerBusy]);
 
   const stopCasting = useCallback(() => {
     if (googleCasting) {
@@ -565,7 +591,10 @@ export const useChromecast = (
     deviceName,
     castMessage,
     castDevices,
-    castToDevice,
+    pendingCastDevice,
+    selectCastDevice,
+    confirmCastDevice,
+    dismissCastConfirm,
     cancelCastPicker,
     requestCastSession,
     stopCasting,
