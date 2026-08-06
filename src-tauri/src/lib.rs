@@ -146,6 +146,46 @@ fn build_window(app: &tauri::AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
+/// Opens (or focuses, if already open) the debug-mode log window — a second
+/// window onto the SAME relay-served frontend, just at a different route
+/// (`/debug-log`), which polls `/api/debug/log` for the live request log.
+#[cfg(desktop)]
+#[tauri::command]
+fn open_debug_window(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("debug-log") {
+        let _ = window.show();
+        let _ = window.set_focus();
+        return Ok(());
+    }
+    let mut builder = WebviewWindowBuilder::new(
+        &app,
+        "debug-log",
+        WebviewUrl::External(
+            format!("{RELAY_HOST_URL}/debug-log")
+                .parse()
+                .map_err(|e| format!("invalid debug window url: {e}"))?,
+        ),
+    )
+    .title("Community IPTV Player — Debug Log")
+    .inner_size(720.0, 560.0)
+    .min_inner_size(420.0, 300.0)
+    .resizable(true);
+    // Share "main"'s pinned storage profile — otherwise this window gets
+    // Tauri's default (unpinned) one, which is empty, and the frontend's
+    // empty-storage backup restore would kick in for no reason.
+    if let Some(dir) = webview_data_dir(&app) {
+        builder = builder.data_directory(dir);
+    }
+    builder.build().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[cfg(not(desktop))]
+#[tauri::command]
+fn open_debug_window() -> Result<(), String> {
+    Err("Debug window is desktop-only.".to_string())
+}
+
 async fn relay_health_ok() -> bool {
     let client = match reqwest::Client::builder()
         .timeout(Duration::from_millis(700))
@@ -261,6 +301,7 @@ pub fn run() {
                 tauri::plugin::Builder::<tauri::Wry, ()>::new("cast-noop").build()
             }
         })
+        .invoke_handler(tauri::generate_handler![open_debug_window])
         .setup(|app| {
             // Desktop serves the built UI from the relay (mode A: window loads
             // http://127.0.0.1:PORT). Mobile loads the bundled UI via Tauri's

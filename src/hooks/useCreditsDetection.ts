@@ -73,6 +73,13 @@ export interface UseCreditsDetectionReturn extends CreditsDetectionResult {
   /** User closed the suggestion — stays closed until the item or seek changes. */
   dismissed: boolean;
   dismiss: () => void;
+  /**
+   * The player's "mark credits start" button calls this with the current
+   * playback time. Takes absolute priority over everything else — even an
+   * exact marker — for the rest of this item: a deliberate, in-the-moment
+   * click is the most trustworthy signal there is.
+   */
+  markDetected: (at: number) => void;
 }
 
 interface DialogueTrackState {
@@ -153,6 +160,10 @@ export const useCreditsDetection = ({
 }: UseCreditsDetectionOptions): UseCreditsDetectionReturn => {
   const [result, setResult] = useState<CreditsDetectionResult>(IDLE_RESULT);
   const [dismissed, setDismissed] = useState(false);
+  // Set by the "mark credits start" button; null means no manual override for
+  // this item. Kept as media-time seconds, not a boolean, so a re-click can
+  // correct an earlier mark.
+  const [manualMark, setManualMark] = useState<number | null>(null);
 
   const resolvedConfig = useMemo(() => resolveCreditsConfig(config), [config]);
   const markerHit = useMemo(
@@ -161,17 +172,77 @@ export const useCreditsDetection = ({
   );
 
   const dismiss = useCallback(() => setDismissed(true), []);
+  const markDetected = useCallback((at: number) => {
+    setDismissed(false);
+    setManualMark(at);
+  }, []);
 
-  // New item: forget the previous detection and any dismissal.
+  // New item: forget the previous detection, dismissal, and manual mark.
   useEffect(() => {
     setResult(IDLE_RESULT);
     setDismissed(false);
+    setManualMark(null);
   }, [contentKey]);
 
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !enabled || !resolvedConfig.enabled) return;
     if (isLive || !Number.isFinite(duration) || duration <= 0) return;
+
+    /* ---- manual mark: same shape as an exact marker, but wins outright --- */
+    if (manualMark != null) {
+      const onManualTimeUpdate = () => {
+        const detected = video.currentTime >= manualMark;
+        setResult((previous) => {
+          // detectedAt must be part of the equality check, or re-marking at a
+          // new time while already past it short-circuits here and the result
+          // keeps the FIRST mark — silently defeating the correction the
+          // comment above promises.
+          if (
+            previous.creditsDetected === detected &&
+            previous.source === "manual" &&
+            previous.detectedAt === (detected ? manualMark : null)
+          ) {
+            return previous;
+          }
+          return {
+            isAnalyzing: false,
+            creditsDetected: detected,
+            detectedAt: detected ? manualMark : null,
+            confidence: detected ? 100 : 0,
+            source: "manual",
+            signals: { ...NO_SIGNALS, nearEnd: detected },
+            debug: resolvedConfig.debug
+              ? {
+                  mediaTime: video.currentTime,
+                  remaining: duration - video.currentTime,
+                  score: detected ? 100 : 0,
+                  consecutive: 0,
+                  availability: { visual: false, subtitles: false, audio: false },
+                  availableWeight: 0,
+                  luma: null,
+                  baselineLuma: null,
+                  darkFraction: null,
+                  motion: null,
+                  baselineMotion: null,
+                  audioLevel: null,
+                  audioVariation: null,
+                  secondsSinceDialogue: null,
+                  reason: "manual",
+                }
+              : null,
+          };
+        });
+        // Seeking back before the mark un-dismisses, so the suggestion can
+        // come back if the user rewinds past the point they marked.
+        if (video.currentTime < manualMark - SEEK_BACK_TOLERANCE_SEC) setDismissed(false);
+      };
+      video.addEventListener("timeupdate", onManualTimeUpdate);
+      // Fire once immediately: the button click already put us at-or-past the
+      // mark, so the overlay should appear right away, not on the next tick.
+      onManualTimeUpdate();
+      return () => video.removeEventListener("timeupdate", onManualTimeUpdate);
+    }
 
     /* ---- exact marker: no sampling needed, just watch the clock ---------- */
     if (markerHit) {
@@ -401,9 +472,9 @@ export const useCreditsDetection = ({
         canvas = null;
       }
     };
-  }, [analyserRef, contentKey, duration, enabled, isLive, markerHit, resolvedConfig, videoRef]);
+  }, [analyserRef, contentKey, duration, enabled, isLive, manualMark, markerHit, resolvedConfig, videoRef]);
 
-  return { ...result, dismissed, dismiss };
+  return { ...result, dismissed, dismiss, markDetected };
 };
 
 /** Media time analysis would begin at — exported for the debug overlay. */

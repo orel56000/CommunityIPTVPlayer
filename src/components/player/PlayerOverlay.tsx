@@ -19,6 +19,7 @@ import {
   ZoomIn,
 } from "lucide-react";
 import clsx from "clsx";
+import type { VideoFitMode } from "../../types/player";
 import { formatDuration } from "../../utils/time";
 import { CastDevicePicker } from "./CastDevicePicker";
 import type { RelayCastDevice } from "../../hooks/useChromecast";
@@ -66,6 +67,9 @@ export interface PlayerOverlayProps {
   /** Current video zoom factor (1 = 100%, no zoom). */
   videoScale: number;
   onVideoScale: (scale: number) => void;
+  /** How the video maps onto its box (contain/cover/fill/none). */
+  videoFitMode?: VideoFitMode;
+  onVideoFitModeChange?: (mode: VideoFitMode) => void;
   /** A next episode is queued (series only) — shows the in-player skip button. */
   canPlayNext?: boolean;
   nextEpisodeLabel?: string | null;
@@ -83,6 +87,12 @@ const RATES = [0.5, 0.75, 1, 1.25, 1.5, 2];
 const ZOOM_MIN = 1;
 const ZOOM_MAX = 5;
 const ZOOM_PRESETS = [1, 1.5, 2, 3, 4];
+const FIT_MODES: { value: VideoFitMode; label: string; title: string }[] = [
+  { value: "none", label: "Original", title: "Original — native size, no scaling" },
+  { value: "contain", label: "Fit", title: "Fit — show the whole picture, may letterbox" },
+  { value: "cover", label: "Fill", title: "Fill — crop to fill the screen, no black bars" },
+  { value: "fill", label: "Stretch", title: "Stretch — fill exactly, may distort the picture" },
+];
 
 export const PlayerOverlay = ({
   title,
@@ -121,6 +131,8 @@ export const PlayerOverlay = ({
   onChangePlaybackRate,
   videoScale,
   onVideoScale,
+  videoFitMode = "contain",
+  onVideoFitModeChange,
   canPlayNext = false,
   nextEpisodeLabel = null,
   onPlayNext,
@@ -439,6 +451,30 @@ export const PlayerOverlay = ({
                   className="absolute bottom-full right-0 mb-2 w-52 rounded-md border border-slate-700 bg-slate-950/95 p-3 shadow-xl"
                   onClick={(event) => event.stopPropagation()}
                 >
+                  {onVideoFitModeChange ? (
+                    <>
+                      <div className="mb-2 text-xs text-slate-300">Fit</div>
+                      <div className="mb-3 flex flex-wrap gap-1">
+                        {FIT_MODES.map((mode) => (
+                          <button
+                            key={mode.value}
+                            type="button"
+                            className={clsx(
+                              "rounded px-2 py-1 text-[11px] transition",
+                              videoFitMode === mode.value
+                                ? "bg-cyan-500/80 text-white"
+                                : "bg-slate-800 text-slate-200 hover:bg-slate-700",
+                            )}
+                            title={mode.title}
+                            onClick={() => onVideoFitModeChange(mode.value)}
+                          >
+                            {mode.label}
+                          </button>
+                        ))}
+                      </div>
+                      <div className="mb-3 border-t border-slate-800" />
+                    </>
+                  ) : null}
                   <div className="mb-2 flex items-center justify-between text-xs">
                     <span className="text-slate-300">Zoom</span>
                     <span className="tabular-nums text-cyan-300">{zoomPercent}%</span>

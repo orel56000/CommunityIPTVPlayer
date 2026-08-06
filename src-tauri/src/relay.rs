@@ -31,7 +31,7 @@ use std::hash::{Hash, Hasher};
 use std::net::{SocketAddr, UdpSocket};
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicI64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::process::{Child, Command};
@@ -51,9 +51,29 @@ const SESSION_TTL: Duration = Duration::from_secs(120);
 /// forcing the video element to bounce around the file hunting for its moov atom).
 const REQUEST_RATE_WINDOW: Duration = Duration::from_secs(10);
 
+/// Debug-mode log ring buffer: newest-N requests, both the relay's own
+/// outbound provider fetches and everything the frontend reports about its
+/// own `fetch()` calls. Bounded so a long debug session can't grow unbounded.
+const DEBUG_LOG_CAPACITY: usize = 500;
+
 // ---------------------------------------------------------------------------
 // Shared state
 // ---------------------------------------------------------------------------
+
+/// One logged request, shown in the debug-mode log window — either something
+/// the relay itself fetched from a provider, or something the frontend's own
+/// `fetch()` reported about its call to the relay.
+#[derive(Clone, Serialize)]
+struct DebugLogEntry {
+    id: u64,
+    ts_ms: i64,
+    source: &'static str,
+    method: String,
+    url: String,
+    status: Option<u16>,
+    duration_ms: Option<u64>,
+    error: Option<String>,
+}
 
 #[derive(Clone)]
 pub struct RelayState {
@@ -71,6 +91,12 @@ pub struct RelayState {
     /// `note_request`. One entry per distinct host ever seen; fine in practice
     /// since a session only ever talks to a handful of provider hosts.
     request_log: Arc<Mutex<HashMap<String, VecDeque<Instant>>>>,
+    /// Debug-mode request log (see `DebugLogEntry`) — a bounded ring buffer
+    /// the frontend polls via `/api/debug/log` while its debug window is open.
+    debug_log: Arc<Mutex<VecDeque<DebugLogEntry>>>,
+    /// Monotonic id for debug-log entries, so the frontend can poll with
+    /// `?since=<id>` instead of re-fetching the whole buffer every time.
+    debug_seq: Arc<AtomicU64>,
     /// NVENC (NVIDIA GPU H.264 encode) availability, probed once: 0=unknown,
     /// 1=available, 2=unavailable. Lets heavy (4K/HEVC) transcodes run on the
     /// GPU in real time instead of choking libx264 on the CPU.
@@ -106,6 +132,8 @@ impl RelayState {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             starting: Arc::new(Mutex::new(HashMap::new())),
             request_log: Arc::new(Mutex::new(HashMap::new())),
+            debug_log: Arc::new(Mutex::new(VecDeque::new())),
+            debug_seq: Arc::new(AtomicU64::new(1)),
             nvenc: Arc::new(AtomicU8::new(0)),
             backup_dir: backup_dir.map(Arc::new),
             #[cfg(desktop)]
@@ -165,6 +193,34 @@ fn host_of(url_str: &str) -> String {
         .ok()
         .and_then(|u| u.host_str().map(str::to_string))
         .unwrap_or_else(|| "?".to_string())
+}
+
+/// Record one request in the debug-mode log ring buffer. Cheap no-op cost
+/// when nobody has the debug window open — just an in-memory push.
+async fn push_debug_log(
+    state: &RelayState,
+    source: &'static str,
+    method: impl Into<String>,
+    url: impl Into<String>,
+    status: Option<u16>,
+    duration_ms: Option<u64>,
+    error: Option<String>,
+) {
+    let entry = DebugLogEntry {
+        id: state.debug_seq.fetch_add(1, Ordering::Relaxed),
+        ts_ms: now_ms(),
+        source,
+        method: method.into(),
+        url: url.into(),
+        status,
+        duration_ms,
+        error,
+    };
+    let mut log = state.debug_log.lock().await;
+    log.push_back(entry);
+    while log.len() > DEBUG_LOG_CAPACITY {
+        log.pop_front();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -269,6 +325,13 @@ pub fn router(
         // stale UI to every new window. Loopback-only.
         .route("/api/takeover", post(takeover))
         .route("/api/server-info", get(server_info))
+        // Debug-mode log window: GET polls for new entries, POST reports a
+        // frontend fetch, DELETE clears the buffer (its "Clear" button).
+        // Loopback-only — the buffer records what the app is fetching.
+        .route(
+            "/api/debug/log",
+            get(debug_log_get).post(debug_log_post).delete(debug_log_clear),
+        )
         // In-app updater: download the release APK and hand it to the Android
         // package installer (Android only; no-op error elsewhere).
         .route(
@@ -747,6 +810,81 @@ async fn server_info() -> Response {
 }
 
 // ---------------------------------------------------------------------------
+// /api/debug/log — debug-mode request log (relay-side + frontend-reported)
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct DebugLogQuery {
+    /// Only entries with id > since — lets the debug window poll deltas
+    /// instead of re-fetching the whole buffer every tick.
+    since: Option<u64>,
+}
+
+async fn debug_log_get(
+    State(state): State<RelayState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Query(q): Query<DebugLogQuery>,
+) -> Response {
+    // Loopback-only: the relay binds 0.0.0.0 behind permissive CORS, so without
+    // this any LAN device — or any web page the user has open — could read the
+    // request log.
+    if !peer.ip().is_loopback() {
+        return cors_text(StatusCode::FORBIDDEN, "loopback only".to_string());
+    }
+    let since = q.since.unwrap_or(0);
+    let log = state.debug_log.lock().await;
+    let items: Vec<&DebugLogEntry> = log.iter().filter(|e| e.id > since).collect();
+    (
+        [(header::CONTENT_TYPE, "application/json")],
+        serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_string()),
+    )
+        .into_response()
+}
+
+async fn debug_log_clear(
+    State(state): State<RelayState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+) -> Response {
+    if !peer.ip().is_loopback() {
+        return cors_text(StatusCode::FORBIDDEN, "loopback only".to_string());
+    }
+    state.debug_log.lock().await.clear();
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// What the frontend's fetch-wrapper reports about its own request to the
+/// relay — no `id`/`ts_ms`/`source`, those are assigned server-side.
+#[derive(Deserialize)]
+struct DebugLogSubmission {
+    method: String,
+    url: String,
+    status: Option<u16>,
+    duration_ms: Option<u64>,
+    error: Option<String>,
+}
+
+async fn debug_log_post(
+    State(state): State<RelayState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    axum::Json(body): axum::Json<DebugLogSubmission>,
+) -> Response {
+    if !peer.ip().is_loopback() {
+        return cors_text(StatusCode::FORBIDDEN, "loopback only".to_string());
+    }
+    push_debug_log(
+        &state,
+        "frontend",
+        body.method,
+        body.url,
+        body.status,
+        body.duration_ms,
+        body.error,
+    )
+    .await;
+    StatusCode::NO_CONTENT.into_response()
+}
+
+// ---------------------------------------------------------------------------
 // /api/update/install — download the release APK and open the system installer
 // ---------------------------------------------------------------------------
 
@@ -905,6 +1043,16 @@ async fn stream(
                 started.elapsed().as_millis(),
                 REQUEST_RATE_WINDOW.as_secs()
             );
+            push_debug_log(
+                &state,
+                "relay",
+                "GET",
+                format!("{host}/{file}"),
+                None,
+                Some(started.elapsed().as_millis() as u64),
+                Some(e.to_string()),
+            )
+            .await;
             return cors_text(
                 StatusCode::BAD_GATEWAY,
                 format!("Relay could not reach the provider: {e}"),
@@ -930,6 +1078,16 @@ async fn stream(
         started.elapsed().as_millis(),
         REQUEST_RATE_WINDOW.as_secs()
     );
+    push_debug_log(
+        &state,
+        "relay",
+        "GET",
+        format!("{host}/{file}"),
+        Some(status.as_u16()),
+        Some(started.elapsed().as_millis() as u64),
+        None,
+    )
+    .await;
 
     let path_lower = target.path().to_ascii_lowercase();
     let vod_media = [".mp4", ".mkv", ".avi", ".mov", ".m4v", ".webm", ".mp3", ".aac", ".flac"]
@@ -1449,6 +1607,16 @@ async fn run_ffmpeg_session(
         "[restream] spawning ffmpeg host={host} mode={mode:?} nvenc={use_nvenc} ({burst} reqs/{}s)",
         REQUEST_RATE_WINDOW.as_secs()
     );
+    push_debug_log(
+        state,
+        "relay",
+        "FFMPEG",
+        host.clone(),
+        None,
+        None,
+        None,
+    )
+    .await;
 
     // Drain stderr: keep a tail for error messages AND parse the input dump to
     // learn the source codecs (for the copy-vs-transcode decision).

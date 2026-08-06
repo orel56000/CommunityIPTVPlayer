@@ -38,7 +38,11 @@ engine is testable without a browser.
 A known timestamp always beats a guess. `resolveMarkerCreditsStart` takes the
 first source that supplies a usable `creditsStart`:
 
-1. **`manual`** — a timestamp set for this exact item.
+1. **`manual`** — the player's flag button ("Mark credits start", next to
+   Play next in the control bar) captures the current playback time for this
+   exact item's own session. Always available for VOD, not gated behind
+   detection firing — it exists specifically for what the heuristic misses
+   (anime OP/ED over full-motion animation, credits over active footage).
 2. **`backend` / playlist** — attributes on the playlist entry itself, read by
    `parseMarkersFromItem`. A provider can ship the answer with the M3U:
 
@@ -155,19 +159,28 @@ scene out from under the viewer.
 `localStorage` under `iptv:credits-feedback:v1`:
 
 ```ts
-{ contentId, groupId, durationSec, detectedCreditsStart, userSkippedAt, userDismissed, reachedVideoEnd }
+{ contentId, groupId, durationSec, detectedCreditsStart, userMarkedAt, userSkippedAt, userDismissed, reachedVideoEnd }
 ```
 
 `getLearnedMarkers` aggregates the records for one series into a marker. It is
-deliberately not a model — a median plus an agreement check:
+deliberately not a model — a median plus an agreement check, tried at two
+confidence levels:
 
-- Pressing "Play next" is the strongest evidence (`userSkippedAt`). A detection
-  the user neither skipped nor dismissed on an episode that then ran to the end
-  is weaker but usable. A dismissal teaches only "not that", so it is excluded.
-- Each usable timestamp becomes *seconds before the end*, which is what stays
-  constant across episodes of differing length.
-- At least 3 episodes must agree within ±25s of the median. Otherwise no marker
-  is produced and the heuristic keeps running.
+- **Manual marks first** (`userMarkedAt`, from the flag button): a deliberate,
+  precise click beats inferred behavior, so **one is enough to trust** — the
+  next episode of the series gets a `learned` marker immediately, without
+  waiting for a pattern to emerge. Unlike the inferred signals below, a manual
+  mark is *not* discarded by a later dismissal of the resulting overlay —
+  dismissing is about not wanting to jump episodes right now (there might be a
+  post-credit scene), not a retraction of where credits were said to start.
+- **Falls back to inferred signals** when there's no usable manual mark yet.
+  Pressing "Play next" off an auto-detected suggestion is the strongest
+  evidence here (`userSkippedAt`). A detection the user neither skipped nor
+  dismissed, on an episode that then ran to the end, is weaker but usable. A
+  dismissal teaches only "not that", so it is excluded. At least 3 episodes
+  must agree within ±25s of the median, or no marker is produced.
+- Either way, each usable timestamp becomes *seconds before the end*, which is
+  what stays constant across episodes of differing length.
 
 Nothing is uploaded, and no audio or video ever leaves the machine — only a
 handful of timestamps. Sending these to a backend to build a shared marker per
@@ -215,8 +228,13 @@ useCreditsDetection({ /* … */, config: { triggerScore: 60, requiredConsecutive
 npm test
 ```
 
-Runs on Node's built-in test runner (no framework, no extra dependencies) and
-covers the scan window, score normalisation and the `usable` guard, frame
-metrics, subtitle classification and density, each signal's baseline-relative
-behaviour, the detection state machine (streak, reset, withdrawal, fire-once),
-and marker priority and validation.
+Runs on Node's built-in test runner (no framework, no extra dependencies).
+`creditsDetection.test.ts` covers the scan window, score normalisation and the
+`usable` guard, frame metrics, subtitle classification and density, each
+signal's baseline-relative behaviour, the detection state machine (streak,
+reset, withdrawal, fire-once), and marker priority and validation.
+`creditsMarkers.test.ts` covers timestamp/EXTINF parsing, content/group
+identity, the feedback merge logic, and `getLearnedMarkers` — including that a
+single manual mark is trusted immediately, wins over disagreeing inferred
+signals, survives a dismissal, and is still bound by the same plausibility and
+agreement checks as everything else.

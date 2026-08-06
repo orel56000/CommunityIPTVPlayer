@@ -4,6 +4,7 @@ import Hls from "hls.js";
 import mpegts from "mpegts.js";
 import type { CreditsFeedbackRecord } from "../../types/credits";
 import type { EpisodeItem, PlaylistItem } from "../../types/models";
+import type { VideoFitMode } from "../../types/player";
 import { useChromecast } from "../../hooks/useChromecast";
 import { useCreditsDetection } from "../../hooks/useCreditsDetection";
 import { DEFAULT_CREDITS_CONFIG } from "../../utils/creditsDetection";
@@ -18,9 +19,11 @@ import { downloadMediaFile, isHlsUrl } from "../../utils/downloadStream";
 import { categoryForSection, writeHttpsCapability } from "../../utils/httpsCapability";
 import { servedByLocalRelay } from "../../utils/relayDiscovery";
 import { toRelayUrl } from "../../utils/secureUrl";
+import { formatDuration } from "../../utils/time";
 import { buildLivePlaybackAttempts, toXtreamTsUrl } from "../../utils/xtreamStreamUrl";
 import { CreditsDebugPanel } from "./CreditsDebugPanel";
 import { CreditsOverlay } from "./CreditsOverlay";
+import { PlayerNavBar } from "./PlayerNavBar";
 import { PlayerOverlay } from "./PlayerOverlay";
 
 interface VideoPlayerProps {
@@ -45,6 +48,9 @@ interface VideoPlayerProps {
   creditsDetection?: boolean;
   /** With the suggestion up, auto-advance after a cancellable countdown. */
   creditsAutoNext?: boolean;
+  /** How the video maps onto its box — mirrors the fit modes common players expose. */
+  videoFitMode?: VideoFitMode;
+  onVideoFitModeChange?: (mode: VideoFitMode) => void;
   className?: string;
 }
 
@@ -358,6 +364,8 @@ export const VideoPlayer = ({
   onPlayNextEpisode,
   creditsDetection = true,
   creditsAutoNext = false,
+  videoFitMode = "contain",
+  onVideoFitModeChange,
   className,
 }: VideoPlayerProps) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -599,8 +607,13 @@ export const VideoPlayer = ({
     config: creditsConfig,
   });
 
-  const { creditsDetected, detectedAt: creditsDetectedAt, dismissed: creditsDismissed, dismiss: dismissCredits } =
-    credits;
+  const {
+    creditsDetected,
+    detectedAt: creditsDetectedAt,
+    dismissed: creditsDismissed,
+    dismiss: dismissCredits,
+    markDetected: markCreditsDetected,
+  } = credits;
   const showCreditsSuggestion = creditsDetected && !creditsDismissed && Boolean(nextEpisode) && !isCasting;
 
   const recordCredits = useCallback(
@@ -650,6 +663,25 @@ export const VideoPlayer = ({
     setCreditsCountdown(null);
     dismissCredits();
   }, [dismissCredits, recordCredits]);
+
+  // "Mark credits start" control: available whenever detection itself would
+  // run (VOD, known duration, not casting) — not gated behind auto-detection,
+  // since the whole point is covering what the heuristic misses (anime
+  // OP/ED over full-motion animation, credits over active footage, ...).
+  // A deliberate click is trusted immediately (see getLearnedMarkers) and
+  // also fires the same "up next" overlay a detection would, right now.
+  const canMarkCredits = creditsDetection && Boolean(item) && !isLive && item?.section !== "live" && !isCasting;
+  const [creditsMarkHint, setCreditsMarkHint] = useState<string | null>(null);
+
+  const handleMarkCreditsStart = useCallback(() => {
+    const video = videoRef.current;
+    if (!video || !item) return;
+    const at = video.currentTime;
+    recordCredits({ userMarkedAt: at });
+    markCreditsDetected(at);
+    setCreditsMarkHint(`Marked — credits start at ${formatDuration(at)}`);
+    window.setTimeout(() => setCreditsMarkHint(null), 4000);
+  }, [item, recordCredits, markCreditsDetected]);
 
   useEffect(() => {
     if (!showCreditsSuggestion || !creditsAutoNext || countdownCancelled) {
@@ -1694,131 +1726,149 @@ export const VideoPlayer = ({
     }
   }, [item]);
   return (
-    <div
-      className={clsx(
-        // `.panel` applies backdrop-filter, which makes this div the containing
-        // block for fixed descendants — with it, the fullscreen player would
-        // "cover" only its own panel. Drop it while in CSS fullscreen.
-        cssFullscreen ? "flex min-h-0 flex-col" : "panel flex min-h-0 flex-col overflow-hidden",
-        className,
-      )}
-    >
+    <>
       <div
-        ref={containerRef}
         className={clsx(
-          "player-viewport group/player overflow-hidden",
-          // CSS fullscreen fallback: cover the whole page above the app chrome.
-          // Must REPLACE `relative`, not sit beside it — Tailwind's `relative`
-          // rule comes after `fixed` in the stylesheet and would win.
-          cssFullscreen ? "fixed inset-0 z-[100] bg-black" : "relative",
-          // Hide the cursor with the controls during playback (e.g. fullscreen);
-          // any pointer move re-shows both via bumpControls.
-          !controlsVisible && "cursor-none",
+          // `.panel` applies backdrop-filter, which makes this div the containing
+          // block for fixed descendants — with it, the fullscreen player would
+          // "cover" only its own panel. Drop it while in CSS fullscreen.
+          cssFullscreen ? "flex min-h-0 flex-col" : "panel flex min-h-0 flex-col overflow-hidden",
+          className,
         )}
-        onPointerMove={bumpControls}
-        onPointerLeave={() => {
-          if (displayPlaying && !displayLoading && !localError) setControlsVisible(false);
-        }}
-        // Show on focus AND reschedule the hide, so a control keeping focus
-        // (after a click, or tabbing) doesn't leave the bar stuck visible.
-        onFocus={bumpControls}
-        tabIndex={0}
       >
-        <video
-          ref={videoRef}
+        <div
+          ref={containerRef}
           className={clsx(
-            "max-h-full max-w-full bg-black object-contain transition-transform duration-150",
-            // With no stream selected the element has no source; hide it so the
-            // WebView's default gray "no video" poster doesn't show — the black
-            // viewport and the overlay ("No stream selected") remain instead.
-            !item && "hidden",
+            "player-viewport group/player overflow-hidden",
+            // CSS fullscreen fallback: cover the whole page above the app chrome.
+            // Must REPLACE `relative`, not sit beside it — Tailwind's `relative`
+            // rule comes after `fixed` in the stylesheet and would win.
+            cssFullscreen ? "fixed inset-0 z-[100] bg-black" : "relative",
+            // Hide the cursor with the controls during playback (e.g. fullscreen);
+            // any pointer move re-shows both via bumpControls.
+            !controlsVisible && "cursor-none",
           )}
-          style={
-            videoScale !== 1
-              ? { transform: `scale(${videoScale})`, transformOrigin: "center center" }
-              : undefined
-          }
-          controls={false}
-          playsInline
-          onClick={togglePlay}
-          onDoubleClick={() => void toggleFullscreen()}
-        />
-        <PlayerOverlay
-          title={title}
-          loading={displayLoading}
-          error={localError}
-          isPlaying={displayPlaying}
-          isLive={isLive}
-          isFullscreen={isFullscreen || cssFullscreen}
-          canPip={canPip}
-          canCast={canCast}
-          castDevices={castDevices}
-          pendingCastDevice={pendingCastDevice}
-          onPickCastDevice={selectCastDevice}
-          onConfirmCastDevice={() => void confirmCastDevice()}
-          onDismissCastConfirm={dismissCastConfirm}
-          onCancelCastPicker={cancelCastPicker}
-          castActive={isCasting}
-          castDeviceLabel={deviceName}
-          castHint={castMessage}
-          muted={muted}
-          volume={volume}
-          volumePercentMode={volumePercentMode}
-          currentTime={displayTime}
-          duration={displayDuration}
-          buffered={displayBuffered}
-          playbackRate={playbackRate}
-          controlsVisible={controlsVisible}
-          onTogglePlay={togglePlay}
-          onSeekTo={seekTo}
-          onSkip={skipBy}
-          onToggleMute={toggleMute}
-          onVolume={handleOverlayVolume}
-          onTogglePip={() => void togglePip()}
-          onToggleFullscreen={() => void toggleFullscreen()}
-          onCast={handleCastClick}
-          onChangePlaybackRate={setRate}
-          videoScale={videoScale}
-          onVideoScale={setVideoZoom}
-          canPlayNext={Boolean(nextEpisode)}
-          nextEpisodeLabel={
-            nextEpisode ? `S${nextEpisode.season ?? 0}E${nextEpisode.episode ?? 0} · ${nextEpisode.title}` : null
-          }
-          onPlayNext={onPlayNextEpisode}
-          canDownload={Boolean(item)}
-          downloadBusy={downloadBusy}
-          downloadHint={downloadHint}
-          isHlsStream={item ? isHlsUrl(item.streamUrl) : false}
-          onDownload={() => void handleDownload()}
-          errorActionLabel={playbackBlocked ? "Connect backend" : "Try again"}
-          onErrorAction={
-            playbackBlocked
-              ? onPlaybackBlockedAction
-              : () => setRetryNonce((nonce) => nonce + 1)
-          }
-        />
-        <CreditsOverlay
-          visible={showCreditsSuggestion}
-          nextEpisodeLabel={
-            nextEpisode ? `S${nextEpisode.season ?? 0}E${nextEpisode.episode ?? 0} · ${nextEpisode.title}` : null
-          }
-          countdownSeconds={creditsCountdown}
-          countdownTotalSeconds={CREDITS_COUNTDOWN_SEC}
-          onPlayNext={handleCreditsPlayNext}
-          onDismiss={handleCreditsDismiss}
-          onCancelCountdown={() => {
-            setCountdownCancelled(true);
-            setCreditsCountdown(null);
+          onPointerMove={bumpControls}
+          onPointerLeave={() => {
+            if (displayPlaying && !displayLoading && !localError) setControlsVisible(false);
           }}
-        />
-        {import.meta.env.DEV ? (
-          <CreditsDebugPanel
-            result={credits}
-            triggerScore={DEFAULT_CREDITS_CONFIG.triggerScore}
-            requiredConsecutiveSamples={DEFAULT_CREDITS_CONFIG.requiredConsecutiveSamples}
+          // Show on focus AND reschedule the hide, so a control keeping focus
+          // (after a click, or tabbing) doesn't leave the bar stuck visible.
+          onFocus={bumpControls}
+          tabIndex={0}
+        >
+          <video
+            ref={videoRef}
+            className={clsx(
+              // The element's box must be the VIEWPORT, not the media. With only
+              // max-w/max-h (plus Preflight's `video { height: auto }`) a replaced
+              // element keeps the stream's own aspect ratio, so box ratio == media
+              // ratio and object-fit is a definitional no-op — contain, cover and
+              // fill all paint identically. Absolute rather than a w-full/h-full
+              // flex item so a future in-flow sibling can't shrink it; every
+              // sibling overlay is already absolute, and the parent is always
+              // positioned (`relative`, or `fixed inset-0` in CSS fullscreen).
+              "absolute inset-0 h-full w-full bg-black transition-transform duration-150",
+              // With no stream selected the element has no source; hide it so the
+              // WebView's default gray "no video" poster doesn't show — the black
+              // viewport and the overlay ("No stream selected") remain instead.
+              !item && "hidden",
+            )}
+            style={{
+              objectFit: videoFitMode,
+              ...(videoScale !== 1 ? { transform: `scale(${videoScale})`, transformOrigin: "center center" } : null),
+            }}
+            controls={false}
+            playsInline
+            onClick={togglePlay}
+            onDoubleClick={() => void toggleFullscreen()}
           />
-        ) : null}
+          <PlayerOverlay
+            title={title}
+            loading={displayLoading}
+            error={localError}
+            isPlaying={displayPlaying}
+            isLive={isLive}
+            isFullscreen={isFullscreen || cssFullscreen}
+            canPip={canPip}
+            canCast={canCast}
+            castDevices={castDevices}
+            pendingCastDevice={pendingCastDevice}
+            onPickCastDevice={selectCastDevice}
+            onConfirmCastDevice={() => void confirmCastDevice()}
+            onDismissCastConfirm={dismissCastConfirm}
+            onCancelCastPicker={cancelCastPicker}
+            castActive={isCasting}
+            castDeviceLabel={deviceName}
+            castHint={castMessage}
+            muted={muted}
+            volume={volume}
+            volumePercentMode={volumePercentMode}
+            currentTime={displayTime}
+            duration={displayDuration}
+            buffered={displayBuffered}
+            playbackRate={playbackRate}
+            controlsVisible={controlsVisible}
+            onTogglePlay={togglePlay}
+            onSeekTo={seekTo}
+            onSkip={skipBy}
+            onToggleMute={toggleMute}
+            onVolume={handleOverlayVolume}
+            onTogglePip={() => void togglePip()}
+            onToggleFullscreen={() => void toggleFullscreen()}
+            onCast={handleCastClick}
+            onChangePlaybackRate={setRate}
+            videoScale={videoScale}
+            onVideoScale={setVideoZoom}
+            videoFitMode={videoFitMode}
+            onVideoFitModeChange={onVideoFitModeChange}
+            canPlayNext={Boolean(nextEpisode)}
+            nextEpisodeLabel={
+              nextEpisode ? `S${nextEpisode.season ?? 0}E${nextEpisode.episode ?? 0} · ${nextEpisode.title}` : null
+            }
+            onPlayNext={onPlayNextEpisode}
+            canDownload={Boolean(item)}
+            downloadBusy={downloadBusy}
+            downloadHint={downloadHint}
+            isHlsStream={item ? isHlsUrl(item.streamUrl) : false}
+            onDownload={() => void handleDownload()}
+            errorActionLabel={playbackBlocked ? "Connect backend" : "Try again"}
+            onErrorAction={
+              playbackBlocked
+                ? onPlaybackBlockedAction
+                : () => setRetryNonce((nonce) => nonce + 1)
+            }
+          />
+          <CreditsOverlay
+            visible={showCreditsSuggestion}
+            nextEpisodeLabel={
+              nextEpisode ? `S${nextEpisode.season ?? 0}E${nextEpisode.episode ?? 0} · ${nextEpisode.title}` : null
+            }
+            countdownSeconds={creditsCountdown}
+            countdownTotalSeconds={CREDITS_COUNTDOWN_SEC}
+            onPlayNext={handleCreditsPlayNext}
+            onDismiss={handleCreditsDismiss}
+            onCancelCountdown={() => {
+              setCountdownCancelled(true);
+              setCreditsCountdown(null);
+            }}
+          />
+          {import.meta.env.DEV ? (
+            <CreditsDebugPanel
+              result={credits}
+              triggerScore={DEFAULT_CREDITS_CONFIG.triggerScore}
+              requiredConsecutiveSamples={DEFAULT_CREDITS_CONFIG.requiredConsecutiveSamples}
+            />
+          ) : null}
+        </div>
       </div>
-    </div>
+    <PlayerNavBar
+      nextEpisode={nextEpisode}
+      onPlayNext={onPlayNextEpisode ?? (() => {})}
+      canMarkCredits={canMarkCredits}
+      onMarkCreditsStart={handleMarkCreditsStart}
+      creditsMarkHint={creditsMarkHint}
+    />
+    </>
   );
 };

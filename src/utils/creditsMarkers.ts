@@ -4,15 +4,18 @@
  *
  * Three sources, in the priority order `resolveMarkerCreditsStart` applies:
  *
- * 1. **manual** — a timestamp set for this exact item.
+ * 1. **manual** — the player's "mark credits start" button, for THIS exact
+ *    item's own playback (see `VideoPlayer.tsx`'s `handleMarkCreditsStart`).
  * 2. **backend / playlist** — `parseMarkersFromItem` reads the EXTINF (or Xtream)
  *    attributes of the item itself, so a provider can ship the answer with the
  *    playlist: `#EXTINF:-1 credits-start="2580" ...`. Any of
  *    `credits-start` / `creditsStart` / `tvg-credits-start` (and the matching
  *    `credits-end`, `intro-start`, `intro-end`) is understood, as seconds or
  *    `HH:MM:SS`.
- * 3. **learned** — the median of what the user actually did on previous
- *    episodes of the same series on this device (see `getLearnedMarkers`).
+ * 3. **learned** — aggregated from what the user did on previous episodes of
+ *    the same series on this device (see `getLearnedMarkers`), which itself
+ *    prefers past manual marks over inferred skip/dismiss/reached-end
+ *    behavior.
  *
  * A marker wins over the heuristic outright: it is exact, and re-deriving it
  * from pixels every episode could only make it worse.
@@ -21,17 +24,26 @@
  * leaves the machine — only a handful of timestamps in localStorage.
  */
 
-import type { CreditsFeedbackRecord, VideoMarkers } from "../types/credits";
-import type { PlaylistItem } from "../types/models";
-import { now } from "./time";
+// Explicit .ts extensions (not the app-wide convention — see tsconfig.app.json)
+// so this file's own dependencies resolve under Node's test runner too, since
+// creditsMarkers.test.ts imports it directly by path, not through Vite.
+import type { CreditsFeedbackRecord, VideoMarkers } from "../types/credits.ts";
+import type { PlaylistItem } from "../types/models.ts";
+import { now } from "./time.ts";
 
 const FEEDBACK_KEY = "iptv:credits-feedback:v1";
 const MAX_RECORDS = 400;
 
-/** Minimum agreeing episodes before a series marker is trusted. */
+/** Minimum agreeing episodes before a series marker is trusted from inferred behavior. */
 const LEARN_MIN_SAMPLES = 3;
 /** Max spread (seconds) around the median for the samples to count as agreeing. */
 const LEARN_MAX_SPREAD_SEC = 25;
+/**
+ * A manual "mark credits start" click is a deliberate, precise statement of
+ * fact, not inferred behavior — one is enough to trust, rather than waiting
+ * for LEARN_MIN_SAMPLES agreeing episodes.
+ */
+const MANUAL_MIN_SAMPLES = 1;
 
 /* --------------------------------------------------- playlist attributes -- */
 
@@ -134,8 +146,30 @@ const writeRecords = (records: CreditsFeedbackRecord[]): void => {
 };
 
 /**
+ * Merge one observation onto an episode's existing record (if any). Pure and
+ * localStorage-free so it is unit-testable on its own — `recordCreditsFeedback`
+ * is just this plus the read/write I/O.
+ */
+export const mergeCreditsFeedback = (
+  existing: CreditsFeedbackRecord | undefined,
+  update: Partial<CreditsFeedbackRecord> & { contentId: string; groupId: string; durationSec: number },
+  updatedAt: number,
+): CreditsFeedbackRecord => ({
+  ...existing,
+  ...update,
+  // Each call carries only what it observed, so a later "reached the end"
+  // must not erase the earlier "user skipped at 42:10".
+  detectedCreditsStart: update.detectedCreditsStart ?? existing?.detectedCreditsStart ?? null,
+  userMarkedAt: update.userMarkedAt ?? existing?.userMarkedAt ?? null,
+  userSkippedAt: update.userSkippedAt ?? existing?.userSkippedAt ?? null,
+  userDismissed: (update.userDismissed ?? false) || (existing?.userDismissed ?? false),
+  reachedVideoEnd: (update.reachedVideoEnd ?? false) || (existing?.reachedVideoEnd ?? false),
+  updatedAt,
+});
+
+/**
  * Merge one observation for an episode. Called when credits are detected, when
- * the user skips or dismisses, and when playback reaches the end.
+ * the user marks, skips, or dismisses, and when playback reaches the end.
  */
 export const recordCreditsFeedback = (
   update: Partial<CreditsFeedbackRecord> & { contentId: string; groupId: string; durationSec: number },
@@ -143,17 +177,7 @@ export const recordCreditsFeedback = (
   if (!Number.isFinite(update.durationSec) || update.durationSec <= 0) return;
   const records = readRecords();
   const existing = records.find((record) => record.contentId === update.contentId);
-  const merged: CreditsFeedbackRecord = {
-    ...existing,
-    ...update,
-    // Each call carries only what it observed, so a later "reached the end"
-    // must not erase the earlier "user skipped at 42:10".
-    detectedCreditsStart: update.detectedCreditsStart ?? existing?.detectedCreditsStart ?? null,
-    userSkippedAt: update.userSkippedAt ?? existing?.userSkippedAt ?? null,
-    userDismissed: (update.userDismissed ?? false) || (existing?.userDismissed ?? false),
-    reachedVideoEnd: (update.reachedVideoEnd ?? false) || (existing?.reachedVideoEnd ?? false),
-    updatedAt: now(),
-  };
+  const merged = mergeCreditsFeedback(existing, update, now());
   writeRecords([merged, ...records.filter((record) => record.contentId !== update.contentId)]);
 };
 
@@ -184,18 +208,50 @@ const learnableFromEnd = (record: CreditsFeedbackRecord): number | null => {
   return fromEnd;
 };
 
+/**
+ * Unlike `learnableFromEnd`, a manual mark is NOT excluded by `userDismissed`:
+ * dismissing the resulting "up next" overlay is a statement about whether the
+ * user wants to jump episodes right now (they might want this episode's
+ * post-credit scene), not a retraction of where they said credits start.
+ */
+const manuallyMarkedFromEnd = (record: CreditsFeedbackRecord): number | null => {
+  const at = record.userMarkedAt;
+  if (at == null || !Number.isFinite(at)) return null;
+  const fromEnd = record.durationSec - at;
+  if (fromEnd <= 5 || fromEnd > record.durationSec * 0.5) return null;
+  return fromEnd;
+};
+
 const medianOf = (values: number[]): number => {
   const sorted = [...values].sort((a, b) => a - b);
   const middle = Math.floor(sorted.length / 2);
   return sorted.length % 2 === 0 ? (sorted[middle - 1] + sorted[middle]) / 2 : sorted[middle];
 };
 
+const creditsStartFromAgreeingSamples = (
+  samples: number[],
+  minSamples: number,
+  durationSec: number,
+): VideoMarkers | null => {
+  if (samples.length < minSamples) return null;
+  const centre = medianOf(samples);
+  const agreeing = samples.filter((value) => Math.abs(value - centre) <= LEARN_MAX_SPREAD_SEC);
+  if (agreeing.length < minSamples) return null;
+  const creditsStart = durationSec - medianOf(agreeing);
+  if (creditsStart <= durationSec * 0.5 || creditsStart >= durationSec - 5) return null;
+  return { creditsStart };
+};
+
 /**
  * Aggregate this device's history for a series into a credits marker.
  *
- * Deliberately not a model: it is a median plus an agreement check. If the
- * episodes disagree by more than `LEARN_MAX_SPREAD_SEC` around that median, no
- * marker is returned and the heuristic keeps running.
+ * Deliberately not a model: it is a median plus an agreement check. Explicit
+ * manual marks are tried first and trusted after just `MANUAL_MIN_SAMPLES`
+ * (deliberate action beats inferred behavior); if there aren't enough of
+ * those, falls back to the passive signals (skip/dismiss/reached-end), which
+ * need `LEARN_MIN_SAMPLES` agreeing episodes. Either way, if the episodes
+ * disagree by more than `LEARN_MAX_SPREAD_SEC` around the median, no marker is
+ * returned and the heuristic keeps running.
  */
 export const getLearnedMarkers = (
   groupId: string | null,
@@ -205,18 +261,12 @@ export const getLearnedMarkers = (
   if (!groupId || !Number.isFinite(durationSec) || durationSec <= 0) return null;
   if (!groupId.startsWith("series:")) return null;
 
-  const samples = records
-    .filter((record) => record.groupId === groupId)
-    .map(learnableFromEnd)
-    .filter((value): value is number => value != null);
+  const groupRecords = records.filter((record) => record.groupId === groupId);
 
-  if (samples.length < LEARN_MIN_SAMPLES) return null;
+  const manualSamples = groupRecords.map(manuallyMarkedFromEnd).filter((value): value is number => value != null);
+  const manual = creditsStartFromAgreeingSamples(manualSamples, MANUAL_MIN_SAMPLES, durationSec);
+  if (manual) return manual;
 
-  const centre = medianOf(samples);
-  const agreeing = samples.filter((value) => Math.abs(value - centre) <= LEARN_MAX_SPREAD_SEC);
-  if (agreeing.length < LEARN_MIN_SAMPLES) return null;
-
-  const creditsStart = durationSec - medianOf(agreeing);
-  if (creditsStart <= durationSec * 0.5 || creditsStart >= durationSec - 5) return null;
-  return { creditsStart };
+  const samples = groupRecords.map(learnableFromEnd).filter((value): value is number => value != null);
+  return creditsStartFromAgreeingSamples(samples, LEARN_MIN_SAMPLES, durationSec);
 };

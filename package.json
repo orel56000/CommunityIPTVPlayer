@@ -26,6 +26,7 @@
   "license": "MIT",
   "description": "Community IPTV Player (CTV), a client-side IPTV web app with localStorage persistence",
   "dependencies": {
+    "@tauri-apps/api": "^2.11.1",
     "@tauri-apps/plugin-opener": "^2.5.4",
     "@vercel/analytics": "^2.0.1",
     "clsx": "^2.1.1",

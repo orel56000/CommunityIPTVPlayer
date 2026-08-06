@@ -6,7 +6,9 @@ import type {
   RecentEntry,
   SavedPlaylist,
 } from "../types/models";
-import type { AppSettings } from "../types/player";
+import type { AppSettings, VideoFitMode } from "../types/player";
+
+const VIDEO_FIT_MODES: readonly VideoFitMode[] = ["contain", "cover", "fill", "none"];
 
 export const STORAGE_KEY = "iptv-player-state-v1";
 const clampVolume = (value: number): number => Math.min(2, Math.max(0, value));
@@ -48,6 +50,8 @@ const defaultState: PersistedState = {
     volumePercentMode: false,
     creditsDetection: true,
     creditsAutoNext: false,
+    videoFitMode: "contain",
+    debugMode: true,
     theme: "dark",
     sidebarCollapsed: false,
     rightPanelOpen: true,
@@ -136,6 +140,13 @@ export const storage = {
             typeof parsed.settings?.creditsAutoNext === "boolean"
               ? parsed.settings.creditsAutoNext
               : defaultState.settings.creditsAutoNext,
+          videoFitMode: VIDEO_FIT_MODES.includes(parsed.settings?.videoFitMode as VideoFitMode)
+            ? (parsed.settings?.videoFitMode as VideoFitMode)
+            : defaultState.settings.videoFitMode,
+          debugMode:
+            typeof parsed.settings?.debugMode === "boolean"
+              ? parsed.settings.debugMode
+              : defaultState.settings.debugMode,
         },
         lastPlayedWatch:
           parsed.lastPlayedWatch &&

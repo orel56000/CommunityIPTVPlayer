@@ -47,6 +47,39 @@ export const buildSeriesFromCatalog = (allItems: PlaylistItem[], catalogItems: P
     .sort((a, b) => a.title.localeCompare(b.title));
 };
 
+/**
+ * Find the `kind:"series"` catalog row that owns `episode`, WITHOUT relying on
+ * that series' episodes already being loaded — Xtream episodes are fetched
+ * lazily, so any lookup that scans `series.episodes` is circular for exactly
+ * the series we still need to resolve.
+ *
+ * The key mirrors buildSeriesFromCatalog above: an episode's `parentSeriesId`
+ * is the provider's raw series id, and the catalog row carries that same value
+ * in both `sourceId` and `xuiId`.
+ *
+ * Returns the catalog item — callers driving a lazy load must pass its
+ * COMPOSITE `.id`, not `parentSeriesId`.
+ *
+ * No title fallback on purpose: XUI catalogs routinely list one show under
+ * several categories/qualities, so a title match can resolve the wrong series.
+ * M3U episodes have no `parentSeriesId` and need no lazy load (groupSeries
+ * already yields full episode lists), so null is the right answer for them.
+ */
+export const findSeriesCatalogItem = (
+  items: PlaylistItem[],
+  episode: Pick<PlaylistItem, "parentSeriesId">,
+): PlaylistItem | null => {
+  const parentId = episode.parentSeriesId;
+  if (!parentId) return null;
+  return (
+    items.find(
+      (item) =>
+        item.kind === "series" &&
+        (item.xuiId === parentId || item.sourceId === parentId || item.id === parentId),
+    ) ?? null
+  );
+};
+
 export const groupSeries = (items: PlaylistItem[]): SeriesItem[] => {
   const seriesItems = items.filter((item) => item.kind === "series_episode");
   const bucket = new Map<string, EpisodeItem[]>();

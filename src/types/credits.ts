@@ -171,6 +171,8 @@ export interface CreditsFeedbackRecord {
   groupId: string;
   durationSec: number;
   detectedCreditsStart: number | null;
+  /** Explicit "this is where credits start" click — the strongest signal there is. */
+  userMarkedAt: number | null;
   userSkippedAt: number | null;
   userDismissed: boolean;
   reachedVideoEnd: boolean;

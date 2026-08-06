@@ -14,7 +14,13 @@ import type {
 import { storage } from "./utils/storage";
 import { getShareId } from "./utils/shareId";
 import { buildEpisodeUrl, buildWatchPath, parseWatchPath, resolveWatchDeepLink } from "./utils/watchUrl";
-import { buildSeriesFromCatalog, getGroups, getNextEpisode, groupSeries } from "./utils/grouping";
+import {
+  buildSeriesFromCatalog,
+  findSeriesCatalogItem,
+  getGroups,
+  getNextEpisode,
+  groupSeries,
+} from "./utils/grouping";
 import { useActivePlaylist } from "./hooks/useActivePlaylist";
 import { usePlaylistImport } from "./hooks/usePlaylistImport";
 import { useFavorites } from "./hooks/useFavorites";
@@ -29,6 +35,7 @@ import { MobileMenu } from "./components/layout/MobileMenu";
 import { UpdateBanner } from "./components/shared/UpdateBanner";
 import { checkForUpdate, type UpdateInfo } from "./utils/appUpdate";
 import { getRelayBase } from "./utils/secureUrl";
+import { openDebugLogWindow, setDebugModeEnabled } from "./utils/debugLog";
 import { SearchOverlay, type SearchOpenFocus } from "./components/layout/SearchOverlay";
 import { PlaylistImportModal } from "./components/playlist/PlaylistImportModal";
 import { VideoPlayer } from "./components/player/VideoPlayer";
@@ -38,7 +45,6 @@ import { ErrorState } from "./components/shared/ErrorState";
 import { InstallAppBanner } from "./components/shared/InstallAppBanner";
 import { BackendConnectionModal } from "./components/shared/BackendConnectionModal";
 import { DetailsPanel } from "./components/panels/DetailsPanel";
-import { PlayerNavBar } from "./components/player/PlayerNavBar";
 import { now } from "./utils/time";
 import { playlistDb } from "./utils/indexedDb";
 import { loadPlaylistSource } from "./utils/loadPlaylistSource";
@@ -247,12 +253,16 @@ const App = () => {
   }, [state.settings.theme]);
 
   useEffect(() => {
+    setDebugModeEnabled(state.settings.debugMode);
+    if (state.settings.debugMode) void openDebugLogWindow();
+  }, [state.settings.debugMode]);
+
+  useEffect(() => {
     if (canPlayVideos) setConnectionPlaybackError(null);
   }, [canPlayVideos]);
 
   const activePlaylist = useActivePlaylist(state.playlists, state.activePlaylistId);
   const playlistItems = useMemo(() => activePlaylist?.items ?? [], [activePlaylist]);
-  const groupedSeries = useMemo(() => groupSeries(playlistItems), [playlistItems]);
   const hasSeriesCatalog = useMemo(
     () => playlistItems.some((item) => item.section === "series" && item.kind === "series"),
     [playlistItems],
@@ -678,15 +688,15 @@ const App = () => {
   );
 
   const ensureSeriesLoaded = useCallback(
-    async (seriesViewId: string) => {
-      if (!activePlaylist || activePlaylist.source.type !== "xtream" || !activePlaylist.source.xtream) return;
+    async (seriesViewId: string, options?: { silent?: boolean }): Promise<boolean> => {
+      if (!activePlaylist || activePlaylist.source.type !== "xtream" || !activePlaylist.source.xtream) return false;
       const seriesItem = activePlaylist.items.find((item) => item.id === seriesViewId && item.kind === "series");
-      if (!seriesItem) return;
+      if (!seriesItem) return false;
       const seriesId = seriesItem.xuiId ?? seriesItem.sourceId;
       const hasEpisodes = activePlaylist.items.some(
         (item) => item.kind === "series_episode" && item.parentSeriesId === seriesId,
       );
-      if (hasEpisodes) return;
+      if (hasEpisodes) return true;
 
       setLoadingSeriesId(seriesViewId);
       try {
@@ -702,14 +712,54 @@ const App = () => {
             return { ...playlist, items: nextItems, itemCount: nextItems.length, lastUpdatedAt: now() };
           }),
         }));
+        return true;
       } catch (error) {
-        setImportError(error instanceof Error ? error.message : "Failed to load series details.");
+        // The auto-load on restore is a background nicety — never surface a
+        // network error banner for a request the user didn't ask for.
+        if (!options?.silent) {
+          setImportError(error instanceof Error ? error.message : "Failed to load series details.");
+        }
+        return false;
       } finally {
         setLoadingSeriesId((current) => (current === seriesViewId ? null : current));
       }
     },
     [activePlaylist, setImportError],
   );
+
+  // Cold-launch / deep-link restore plays an episode recovered from
+  // `state.lastPlayedItem` whose series has never been fetched — Xtream
+  // episodes are lazy and are never written to IndexedDB, so a relaunch always
+  // starts with zero episode rows. Without this, every SeriesItem has
+  // `episodes: []`, getNextEpisode returns null, and the "Up next" bar, the
+  // end-credits suggestion and auto-advance are all dead until the user
+  // browses into the series by hand.
+  //
+  // Resolve the parent from `parentSeriesId` — NOT by scanning loaded
+  // episodes, which is circular for a series that isn't loaded yet.
+  const autoLoadedSeriesRef = useRef<string | null>(null);
+  useEffect(() => {
+    const item = playerState.currentItem;
+    if (!item || item.kind !== "series_episode") return;
+    if (!activePlaylist || item.playlistId !== activePlaylist.id) return;
+
+    // Cheap guards before the O(catalog) scan — this playlist has ~23k items.
+    const parentSeriesId = item.parentSeriesId;
+    if (!parentSeriesId) return; // M3U: nothing to lazy-load
+    if (autoLoadedSeriesRef.current === parentSeriesId) return; // already attempted
+
+    // Null until IndexedDB hydration lands; the effect re-runs when
+    // activePlaylist gets its items, so there's no missed-window race.
+    const catalog = findSeriesCatalogItem(activePlaylist.items, item);
+    if (!catalog) return;
+
+    autoLoadedSeriesRef.current = parentSeriesId;
+    void ensureSeriesLoaded(catalog.id, { silent: true }).then((ok) => {
+      // Let a transient provider/relay failure retry on the next change rather
+      // than suppressing the bar for the rest of the session.
+      if (!ok && autoLoadedSeriesRef.current === parentSeriesId) autoLoadedSeriesRef.current = null;
+    });
+  }, [activePlaylist, ensureSeriesLoaded, playerState.currentItem]);
 
   const handlePlay = useCallback((item: PlaylistItem) => {
     if (item.kind === "series") {
@@ -812,10 +862,14 @@ const App = () => {
         const pl = state.playlists.find((p) => p.id === item.playlistId);
         if (!pl) return;
         const grouped = buildSeriesViewForItems(pl.items);
-        const show = grouped.find((s) => s.episodes.some((ep) => ep.id === item.id));
-        if (show) {
-          void ensureSeriesLoaded(show.id);
-          openSearch({ category: "series", seriesId: show.id });
+        // The grouped scan only works once episodes are loaded; fall back to the
+        // catalog row so this isn't a silent no-op for a lazily-loaded series.
+        const showId =
+          grouped.find((s) => s.episodes.some((ep) => ep.id === item.id))?.id ??
+          findSeriesCatalogItem(pl.items, item)?.id;
+        if (showId) {
+          void ensureSeriesLoaded(showId);
+          openSearch({ category: "series", seriesId: showId });
         }
         return;
       }
@@ -840,8 +894,8 @@ const App = () => {
   const currentNextEpisode = useMemo(() => {
     const current = playerState.currentItem;
     if (!current || current.kind !== "series_episode") return null;
-    return getNextEpisode(groupedSeries, current.id);
-  }, [groupedSeries, playerState.currentItem]);
+    return getNextEpisode(allSeriesForPlaylist, current.id);
+  }, [allSeriesForPlaylist, playerState.currentItem]);
 
   const handleImport = async (
     name: string,
@@ -956,11 +1010,8 @@ const App = () => {
     const current = playerState.currentItem;
     if (!current) return;
     onPlayerProgress(Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER);
-    if (current.section === "series") {
-      const nextEpisode = getNextEpisode(groupedSeries, current.id);
-      if (nextEpisode) {
-        handlePlay(nextEpisode);
-      }
+    if (current.section === "series" && currentNextEpisode) {
+      handlePlay(currentNextEpisode);
     }
   };
 
@@ -1119,13 +1170,9 @@ const App = () => {
               onPlayNextEpisode={() => currentNextEpisode && handlePlay(currentNextEpisode)}
               creditsDetection={state.settings.creditsDetection}
               creditsAutoNext={state.settings.creditsAutoNext}
+              videoFitMode={state.settings.videoFitMode}
+              onVideoFitModeChange={(videoFitMode) => setSettings({ ...state.settings, videoFitMode })}
             />
-            {currentNextEpisode ? (
-              <PlayerNavBar
-                nextEpisode={currentNextEpisode}
-                onPlayNext={() => currentNextEpisode && handlePlay(currentNextEpisode)}
-              />
-            ) : null}
             {importError ? <ErrorState message={importError} onRetry={() => setImportError(null)} /> : null}
             {storageError ? <ErrorState message={storageError} /> : null}
             {deepLinkError ? (

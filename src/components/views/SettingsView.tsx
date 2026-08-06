@@ -1,4 +1,5 @@
 import type { AppSettings } from "../../types/player";
+import { isNativeRuntime } from "../../utils/relayDiscovery";
 
 interface SettingsViewProps {
   settings: AppSettings;
@@ -77,6 +78,22 @@ export const SettingsView = ({
           onChange={(event) => onUpdate({ ...settings, creditsAutoNext: event.target.checked })}
         />
       </label>
+    ) : null}
+    {isNativeRuntime() ? (
+      <>
+        <label className="flex min-w-0 items-center justify-between gap-4 text-sm">
+          <span>Debug mode</span>
+          <input
+            type="checkbox"
+            checked={settings.debugMode}
+            onChange={(event) => onUpdate({ ...settings, debugMode: event.target.checked })}
+          />
+        </label>
+        <p className="text-xs text-slate-500">
+          Opens a separate log window and records every request the app makes — its own fetches, and what the relay
+          fetches from your provider — while it's on.
+        </p>
+      </>
     ) : null}
     <label className="flex min-w-0 items-center justify-between gap-4 text-sm">
       <span>Collapsed sidebar</span>
