@@ -19,16 +19,6 @@ export const setDebugModeEnabled = (enabled: boolean): void => {
   installFetchLogging();
 };
 
-/** Opens (or focuses) the debug log window via the Rust `open_debug_window` command. */
-export const openDebugLogWindow = async (): Promise<void> => {
-  try {
-    const { invoke } = await import("@tauri-apps/api/core");
-    await invoke("open_debug_window");
-  } catch {
-    // Best-effort — the log window is a debugging aid, never block on it.
-  }
-};
-
 const debugLogEndpoint = (): string => `${getRelayBase()}/api/debug/log`;
 
 const reportFetch = (
@@ -44,6 +34,27 @@ const reportFetch = (
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ method, url, status, durationMs: Math.round(durationMs), error }),
   }).catch(() => undefined);
+};
+
+/**
+ * Opens (or focuses) the debug log window via the Rust `open_debug_window`
+ * command. On failure, reports through the SAME `/api/debug/log` the window
+ * itself polls (via `reportFetch`, not just `console.error`) — if the window
+ * never opens, `console.error` is unreachable without devtools, but the ring
+ * buffer is still readable with a plain `curl`. This is how an ACL rejection
+ * (a real bug: the app's own commands need an explicit capability grant when
+ * invoked from remote-loaded content, same as opener:allow-open-url earlier)
+ * was findable at all.
+ */
+export const openDebugLogWindow = async (): Promise<void> => {
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("open_debug_window");
+  } catch (error) {
+    const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+    console.error("[debug-window] open_debug_window failed:", error);
+    reportFetch("INVOKE", "open_debug_window", null, 0, message);
+  }
 };
 
 const requestUrl = (input: RequestInfo | URL): string => {

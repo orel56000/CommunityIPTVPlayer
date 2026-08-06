@@ -153,10 +153,12 @@ fn build_window(app: &tauri::AppHandle) -> tauri::Result<()> {
 #[tauri::command]
 fn open_debug_window(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("debug-log") {
+        log::info!("[debug-window] already open — showing + focusing existing window");
         let _ = window.show();
         let _ = window.set_focus();
         return Ok(());
     }
+    log::info!("[debug-window] creating new window at {RELAY_HOST_URL}/debug-log");
     let mut builder = WebviewWindowBuilder::new(
         &app,
         "debug-log",
@@ -176,8 +178,18 @@ fn open_debug_window(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(dir) = webview_data_dir(&app) {
         builder = builder.data_directory(dir);
     }
-    builder.build().map_err(|e| e.to_string())?;
-    Ok(())
+    match builder.build() {
+        Ok(window) => {
+            log::info!("[debug-window] built OK — forcing show + focus");
+            let _ = window.show();
+            let _ = window.set_focus();
+            Ok(())
+        }
+        Err(e) => {
+            log::error!("[debug-window] build FAILED: {e}");
+            Err(e.to_string())
+        }
+    }
 }
 
 #[cfg(not(desktop))]
