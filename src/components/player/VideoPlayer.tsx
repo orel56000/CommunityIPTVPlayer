@@ -1181,28 +1181,26 @@ export const VideoPlayer = ({
         return;
       }
 
-      latestDiagnostic = await diagnoseStreamUrl(toRelayUrl(playbackBaseUrl));
-      console.info("[IPTV][Player] Starting playback", {
+      // Do NOT pre-probe VOD either — same reason live doesn't (see above).
+      // The probe is a real provider connection (Range: bytes=0-2047), opened
+      // immediately before the video element opens its own, on an IP-locked
+      // panel that counts connections. It also serializes its full round trip
+      // (400-1500ms observed) in front of time-to-first-frame.
+      //
+      // Nothing is lost diagnostically: failPlayback still runs a fresh probe
+      // when playback actually fails, which is when the answer matters. And a
+      // provider block page is already caught server-side without spending an
+      // extra connection — relay.rs returns a clear, retryable 502 when a media
+      // URL answers with text/html.
+      latestDiagnostic = {};
+      console.info("[IPTV][Player] Starting playback (no pre-probe)", {
         ...playbackContext,
         playbackPlan,
-        streamProbe: latestDiagnostic,
       });
       console.info(
         "[IPTV][Player] Paste this JSON:",
-        JSON.stringify({ ...playbackContext, playbackPlan, streamProbe: latestDiagnostic }, null, 2),
+        JSON.stringify({ ...playbackContext, playbackPlan }, null, 2),
       );
-
-      // Only hard-block playback when the probe POSITIVELY identified a bad
-      // payload (HTML page, wrong container). If the probe itself couldn't
-      // fetch (probeFetch !== "ok" — e.g. a transient stall or the provider's
-      // single connection being busy), still let the video element try: the
-      // probe is diagnostic, and playback often succeeds seconds later. Real
-      // failures still surface through failPlayback with a fresh diagnostic.
-      const probeBlockMessage = userMessageFromDiagnostic(latestDiagnostic, playbackMode);
-      if (probeBlockMessage && latestDiagnostic.payloadKind !== "unknown" && latestDiagnostic.probeFetch === "ok") {
-        failPlayback("stream-probe-blocked", { userMessage: probeBlockMessage }, latestDiagnostic);
-        return;
-      }
 
       prepareVideo();
       if (autoplay) armStartupTimeout();
