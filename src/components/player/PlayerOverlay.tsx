@@ -147,10 +147,20 @@ export const PlayerOverlay = ({
   const [ratesOpen, setRatesOpen] = useState(false);
   const [zoomOpen, setZoomOpen] = useState(false);
   const scrubberRef = useRef<HTMLDivElement | null>(null);
-  const [scrubbing, setScrubbing] = useState(false);
+  // A ref, not state: it is never rendered, and the pointerdown -> pointerup
+  // of a fast click can land in the same React batch, so a state flag would
+  // still read false in the pointerup handler and swallow the seek.
+  const scrubbingRef = useRef(false);
+  /** Staged seek target during a drag; committed once on release. */
+  const [pendingSeek, setPendingSeek] = useState<number | null>(null);
   const [hoverPreview, setHoverPreview] = useState<{ left: number; time: number } | null>(null);
 
-  const progressPct = duration > 0 ? Math.min(100, Math.max(0, (currentTime / duration) * 100)) : 0;
+  // While dragging, show the staged position rather than the video's real
+  // time — the seek has not been committed yet, so currentTime is still back
+  // where playback was and the bar would otherwise snap backwards under the
+  // cursor.
+  const displayTime = pendingSeek ?? currentTime;
+  const progressPct = duration > 0 ? Math.min(100, Math.max(0, (displayTime / duration) * 100)) : 0;
   const bufferedPct = duration > 0 ? Math.min(100, Math.max(0, (buffered / duration) * 100)) : 0;
 
   useEffect(() => {
@@ -169,21 +179,35 @@ export const PlayerOverlay = ({
 
   const zoomPercent = Math.round(videoScale * 100);
 
-  const seekFromClientX = (clientX: number): void => {
+  const timeFromClientX = (clientX: number): number | null => {
     const el = scrubberRef.current;
-    if (!el || duration <= 0) return;
+    if (!el || !Number.isFinite(duration) || duration <= 0) return null;
     const rect = el.getBoundingClientRect();
+    // A zero-width bar (not laid out yet, or hidden) makes this 0/0 = NaN;
+    // seeking to NaN throws away the playback position for no reason.
+    if (rect.width <= 0) return null;
     const ratio = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
-    onSeekTo(ratio * duration);
+    const seconds = ratio * duration;
+    return Number.isFinite(seconds) ? seconds : null;
   };
 
+  // While dragging, only the BAR moves — the actual seek is committed once, on
+  // release. Seeking on every pointermove made each drag issue dozens of
+  // seeks, and every seek makes the media element open a fresh byte-range
+  // connection to the provider; IP-locked panels answer that burst with 429
+  // and then refuse everything until the limit resets. This is what made
+  // fast-forwarding unusable.
   const handleScrubPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
     if (isLive || duration <= 0) return;
     event.stopPropagation();
     event.preventDefault();
-    (event.target as Element).setPointerCapture?.(event.pointerId);
-    setScrubbing(true);
-    seekFromClientX(event.clientX);
+    try {
+      (event.target as Element).setPointerCapture?.(event.pointerId);
+    } catch {
+      /* capture is an optimisation; the drag still works without it */
+    }
+    scrubbingRef.current = true;
+    setPendingSeek(timeFromClientX(event.clientX));
   };
 
   const handleScrubPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -192,13 +216,32 @@ export const PlayerOverlay = ({
     const rect = el.getBoundingClientRect();
     const ratio = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
     setHoverPreview({ left: ratio * rect.width, time: ratio * duration });
-    if (scrubbing) seekFromClientX(event.clientX);
+    if (scrubbingRef.current) setPendingSeek(ratio * duration);
   };
 
   const handleScrubPointerUp = (event: React.PointerEvent<HTMLDivElement>) => {
-    if (!scrubbing) return;
-    (event.target as Element).releasePointerCapture?.(event.pointerId);
-    setScrubbing(false);
+    if (!scrubbingRef.current) return;
+    try {
+      (event.target as Element).releasePointerCapture?.(event.pointerId);
+    } catch {
+      /* pointer already released */
+    }
+    scrubbingRef.current = false;
+    // A plain click is pointerdown+up in one spot, so it still seeks — once.
+    const target = timeFromClientX(event.clientX) ?? pendingSeek;
+    setPendingSeek(null);
+    if (target != null) onSeekTo(target);
+  };
+
+  // Pointer capture normally guarantees pointerup, but if the gesture is
+  // cancelled (touch interruption, context menu) commit what was staged
+  // rather than leaving the bar stuck at a position the video never went to.
+  const handleScrubPointerCancel = () => {
+    if (!scrubbingRef.current) return;
+    scrubbingRef.current = false;
+    const target = pendingSeek;
+    setPendingSeek(null);
+    if (target != null) onSeekTo(target);
   };
 
   const handleScrubLeave = () => {
@@ -294,7 +337,7 @@ export const PlayerOverlay = ({
 
       <div className="pointer-events-auto relative z-10 flex flex-col gap-2 px-3 pb-3">
         <div className="flex items-center gap-3 text-xs text-slate-300">
-          <span className="tabular-nums">{isLive ? "LIVE" : formatDuration(currentTime)}</span>
+          <span className="tabular-nums">{isLive ? "LIVE" : formatDuration(displayTime)}</span>
           <div
             ref={scrubberRef}
             className={clsx(
@@ -304,12 +347,13 @@ export const PlayerOverlay = ({
             onPointerDown={handleScrubPointerDown}
             onPointerMove={handleScrubPointerMove}
             onPointerUp={handleScrubPointerUp}
+            onPointerCancel={handleScrubPointerCancel}
             onPointerLeave={handleScrubLeave}
             role="slider"
             aria-label="Seek"
             aria-valuemin={0}
             aria-valuemax={Math.floor(duration) || 0}
-            aria-valuenow={Math.floor(currentTime) || 0}
+            aria-valuenow={Math.floor(displayTime) || 0}
             tabIndex={-1}
           >
             <div className="absolute inset-y-0 left-0 rounded-full bg-slate-500/50" style={{ width: `${bufferedPct}%` }} />

@@ -51,6 +51,18 @@ const SESSION_TTL: Duration = Duration::from_secs(120);
 /// forcing the video element to bounce around the file hunting for its moov atom).
 const REQUEST_RATE_WINDOW: Duration = Duration::from_secs(10);
 
+/// How long to stop contacting a provider host after it answers 429.
+///
+/// A media element does not understand 429 — it just keeps asking for the
+/// bytes it needs, ~3x/second. Forwarding those to a panel that is already
+/// refusing keeps its per-IP limit permanently tripped, so playback can never
+/// recover. During the cool-down the relay answers locally and sends NOTHING
+/// upstream, which is what actually lets the limit reset.
+const RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(10);
+
+/// Never trust an absurd `Retry-After` from the provider — cap the stall.
+const RATE_LIMIT_COOLDOWN_MAX: Duration = Duration::from_secs(60);
+
 /// Debug-mode log ring buffer: newest-N requests, both the relay's own
 /// outbound provider fetches and everything the frontend reports about its
 /// own `fetch()` calls. Bounded so a long debug session can't grow unbounded.
@@ -91,6 +103,10 @@ pub struct RelayState {
     /// `note_request`. One entry per distinct host ever seen; fine in practice
     /// since a session only ever talks to a handful of provider hosts.
     request_log: Arc<Mutex<HashMap<String, VecDeque<Instant>>>>,
+    /// Per-host cool-down deadline, armed when a provider answers 429. While
+    /// set, requests to that host are refused locally instead of forwarded —
+    /// see `RATE_LIMIT_COOLDOWN`. One entry per distinct host ever limited.
+    rate_limited: Arc<Mutex<HashMap<String, Instant>>>,
     /// Debug-mode request log (see `DebugLogEntry`) — a bounded ring buffer
     /// the frontend polls via `/api/debug/log` while its debug window is open.
     debug_log: Arc<Mutex<VecDeque<DebugLogEntry>>>,
@@ -132,6 +148,7 @@ impl RelayState {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             starting: Arc::new(Mutex::new(HashMap::new())),
             request_log: Arc::new(Mutex::new(HashMap::new())),
+            rate_limited: Arc::new(Mutex::new(HashMap::new())),
             debug_log: Arc::new(Mutex::new(VecDeque::new())),
             debug_seq: Arc::new(AtomicU64::new(1)),
             nvenc: Arc::new(AtomicU8::new(0)),
@@ -184,6 +201,38 @@ async fn note_request(state: &RelayState, host: &str) -> usize {
         entry.pop_front();
     }
     entry.len()
+}
+
+/// Parse a `Retry-After` delay in seconds, clamped to something sane.
+/// Only the delta-seconds form is honoured; the HTTP-date form is rare from
+/// these panels and a bad parse must never stall playback longer than the
+/// default. Returns None when absent or unparseable, so callers fall back to
+/// `RATE_LIMIT_COOLDOWN`.
+fn parse_retry_after(value: Option<&str>) -> Option<Duration> {
+    let secs: u64 = value?.trim().parse().ok()?;
+    if secs == 0 {
+        return None;
+    }
+    Some(Duration::from_secs(secs).min(RATE_LIMIT_COOLDOWN_MAX))
+}
+
+/// Remaining cool-down for `host`, or None when it is free to be contacted.
+async fn rate_limit_remaining(state: &RelayState, host: &str) -> Option<Duration> {
+    let limited = state.rate_limited.lock().await;
+    limited
+        .get(host)
+        .and_then(|until| until.checked_duration_since(Instant::now()))
+}
+
+/// Arm the cool-down for `host` after it answered 429.
+async fn note_rate_limited(state: &RelayState, host: &str, retry_after: Option<&str>) -> Duration {
+    let cooldown = parse_retry_after(retry_after).unwrap_or(RATE_LIMIT_COOLDOWN);
+    state
+        .rate_limited
+        .lock()
+        .await
+        .insert(host.to_string(), Instant::now() + cooldown);
+    cooldown
 }
 
 /// Provider host for a source url, used only for logging (never the full URL —
@@ -1032,6 +1081,33 @@ async fn stream(
         .and_then(|s| s.last())
         .unwrap_or("?")
         .to_string();
+    // Circuit breaker: this host recently answered 429, so do NOT add to its
+    // load. Answer locally — the whole point is that nothing goes upstream
+    // while the provider's per-IP limit is trying to reset.
+    if let Some(remaining) = rate_limit_remaining(&state, &host).await {
+        log::warn!(
+            "[stream] host={host} file={file} rate-limited, not forwarding ({}s left)",
+            remaining.as_secs() + 1
+        );
+        push_debug_log(
+            &state,
+            "relay",
+            "GET",
+            format!("{host}/{file}"),
+            Some(StatusCode::TOO_MANY_REQUESTS.as_u16()),
+            Some(0),
+            Some(format!("cooling down {}s — not sent upstream", remaining.as_secs() + 1)),
+        )
+        .await;
+        return cors_text(
+            StatusCode::TOO_MANY_REQUESTS,
+            format!(
+                "The provider is rate-limiting this connection. Pausing requests for {}s so it can recover.",
+                remaining.as_secs() + 1
+            ),
+        );
+    }
+
     let started = Instant::now();
     let burst = note_request(&state, &host).await;
 
@@ -1088,6 +1164,29 @@ async fn stream(
         None,
     )
     .await;
+
+    // The provider is refusing on volume. Arm the cool-down so the media
+    // element's relentless re-asks stop reaching it — without this, a single
+    // 429 turns into a self-sustaining storm (~3 req/s) that keeps the limit
+    // tripped and playback never recovers.
+    if status == StatusCode::TOO_MANY_REQUESTS {
+        let retry_after = upstream
+            .headers()
+            .get(header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok());
+        let cooldown = note_rate_limited(&state, &host, retry_after).await;
+        log::warn!(
+            "[stream] 429 from host={host} file={file} — pausing upstream requests for {}s",
+            cooldown.as_secs()
+        );
+        return cors_text(
+            StatusCode::TOO_MANY_REQUESTS,
+            format!(
+                "The provider is rate-limiting this connection. Pausing requests for {}s so it can recover.",
+                cooldown.as_secs()
+            ),
+        );
+    }
 
     let path_lower = target.path().to_ascii_lowercase();
     let vod_media = [".mp4", ".mkv", ".avi", ".mov", ".m4v", ".webm", ".mp3", ".aac", ".flac"]
@@ -1946,4 +2045,39 @@ fn is_blocked_host(host: Option<&str>) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retry_after_absent_or_unparseable_falls_back_to_default() {
+        // None => caller uses RATE_LIMIT_COOLDOWN.
+        assert_eq!(parse_retry_after(None), None);
+        // HTTP-date form is deliberately not honoured; must not stall forever.
+        assert_eq!(parse_retry_after(Some("Wed, 21 Oct 2026 07:28:00 GMT")), None);
+        assert_eq!(parse_retry_after(Some("")), None);
+        assert_eq!(parse_retry_after(Some("soon")), None);
+        assert_eq!(parse_retry_after(Some("-5")), None);
+    }
+
+    #[test]
+    fn retry_after_honours_a_sane_delay() {
+        assert_eq!(parse_retry_after(Some("5")), Some(Duration::from_secs(5)));
+        assert_eq!(parse_retry_after(Some("  30 ")), Some(Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn retry_after_zero_is_ignored_so_we_still_back_off() {
+        // A provider answering "retry immediately" while rate-limiting would
+        // otherwise reproduce the exact storm this guard exists to stop.
+        assert_eq!(parse_retry_after(Some("0")), None);
+    }
+
+    #[test]
+    fn retry_after_is_capped() {
+        // An absurd value must not park playback for hours.
+        assert_eq!(parse_retry_after(Some("86400")), Some(RATE_LIMIT_COOLDOWN_MAX));
+    }
 }
