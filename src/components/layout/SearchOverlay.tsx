@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import clsx from "clsx";
-import { ChevronRight, Search, Star, X } from "lucide-react";
+import { CheckCircle2, ChevronRight, Search, Star, X } from "lucide-react";
 import type { EpisodeItem, PlaybackProgress, PlaylistItem, SeriesItem } from "../../types/models";
 import { useDebouncedValue } from "../../hooks/useDebouncedValue";
 import { useInfiniteList } from "../../hooks/useInfiniteList";
 import { filterByQuery } from "../../utils/search";
 import { getGroups } from "../../utils/grouping";
+import { watchedStateFor, type WatchedState } from "../../utils/watchedState";
 import { SeriesDetailView } from "../browse/SeriesBrowser";
 
 type SearchCategory =
@@ -75,6 +76,8 @@ interface SearchOverlayProps {
   onToggleFavoriteSeries: (seriesId: string) => void;
   onEnsureSeriesLoaded: (seriesId: string) => void;
   onSetWatched?: (episodes: EpisodeItem[], watched: boolean) => void;
+  /** Mark/unmark a whole series from a list row (loads its episodes first). */
+  onSetSeriesWatched?: (seriesId: string, watched: boolean) => void;
   initialFocus?: SearchOpenFocus | null;
 }
 
@@ -97,6 +100,7 @@ export const SearchOverlay = ({
   onToggleFavoriteSeries,
   onEnsureSeriesLoaded,
   onSetWatched,
+  onSetSeriesWatched,
   initialFocus = null,
 }: SearchOverlayProps) => {
   const inputRef = useRef<HTMLInputElement>(null);
@@ -207,6 +211,27 @@ export const SearchOverlay = ({
     step: 80,
   });
   const visibleItems = useMemo(() => filteredItems.slice(0, visibleCount), [filteredItems, visibleCount]);
+
+  /**
+   * Watched state per series catalog row, for the visible rows only.
+   *
+   * A series counts as watched ONLY when every one of its episodes is — and
+   * that can only be proven once the episodes are actually loaded. They are
+   * fetched lazily and never persisted, so a series whose episodes this session
+   * has not loaded stays unmarked rather than guessing. Clicking the control
+   * loads them first (see handleSetSeriesWatched in App.tsx), so acting on it
+   * is always correct even when the badge cannot know yet.
+   */
+  const seriesWatchedById = useMemo(() => {
+    const byId = new Map<string, WatchedState>();
+    if (!onSetSeriesWatched) return byId;
+    const episodesById = new Map(groupedSeries.map((show) => [show.id, show.episodes]));
+    for (const item of visibleItems) {
+      if (!isSeriesCatalogItem(item)) continue;
+      byId.set(item.id, watchedStateFor(episodesById.get(item.id) ?? [], progressByItemId));
+    }
+    return byId;
+  }, [visibleItems, groupedSeries, progressByItemId, onSetSeriesWatched]);
 
   const handlePick = (item: PlaylistItem) => {
     if (isSeriesCatalogItem(item)) {
@@ -383,7 +408,39 @@ export const SearchOverlay = ({
                     </p>
                   </button>
                   {isSeriesCatalogItem(item) ? (
-                    <ChevronRight size={16} className="shrink-0 text-slate-500" aria-hidden />
+                    <>
+                      {onSetSeriesWatched ? (
+                        <button
+                          type="button"
+                          className="flex shrink-0 items-center rounded p-1.5 transition hover:bg-white/10"
+                          aria-pressed={seriesWatchedById.get(item.id) === "all"}
+                          aria-label={
+                            seriesWatchedById.get(item.id) === "all"
+                              ? `Mark all of ${item.title} as unwatched`
+                              : `Mark all of ${item.title} as watched`
+                          }
+                          title={
+                            seriesWatchedById.get(item.id) === "all"
+                              ? "Whole series watched — click to unmark"
+                              : "Mark every episode in this series as watched"
+                          }
+                          onClick={() => onSetSeriesWatched(item.id, seriesWatchedById.get(item.id) !== "all")}
+                        >
+                          <CheckCircle2
+                            size={16}
+                            className={clsx(
+                              "transition",
+                              seriesWatchedById.get(item.id) === "all"
+                                ? "fill-emerald-400/20 text-emerald-400"
+                                : seriesWatchedById.get(item.id) === "partial"
+                                  ? "text-emerald-400/50"
+                                  : "text-slate-500 opacity-40 hover:opacity-100",
+                            )}
+                          />
+                        </button>
+                      ) : null}
+                      <ChevronRight size={16} className="shrink-0 text-slate-500" aria-hidden />
+                    </>
                   ) : (
                     <button
                       type="button"

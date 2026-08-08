@@ -698,16 +698,21 @@ const App = () => {
     [seriesFavoriteItemById, toggleFavorite],
   );
 
+  // Returns the series' episodes (already-loaded or freshly fetched), or null
+  // when they could not be obtained. Callers that only care whether it worked
+  // can treat null as failure; callers that need to act on the episodes (e.g.
+  // "mark this whole series watched" from the list, where nothing is loaded
+  // yet) get them directly, without waiting for a re-render to observe them.
   const ensureSeriesLoaded = useCallback(
-    async (seriesViewId: string, options?: { silent?: boolean }): Promise<boolean> => {
-      if (!activePlaylist || activePlaylist.source.type !== "xtream" || !activePlaylist.source.xtream) return false;
+    async (seriesViewId: string, options?: { silent?: boolean }): Promise<PlaylistItem[] | null> => {
+      if (!activePlaylist || activePlaylist.source.type !== "xtream" || !activePlaylist.source.xtream) return null;
       const seriesItem = activePlaylist.items.find((item) => item.id === seriesViewId && item.kind === "series");
-      if (!seriesItem) return false;
+      if (!seriesItem) return null;
       const seriesId = seriesItem.xuiId ?? seriesItem.sourceId;
-      const hasEpisodes = activePlaylist.items.some(
+      const alreadyLoaded = activePlaylist.items.filter(
         (item) => item.kind === "series_episode" && item.parentSeriesId === seriesId,
       );
-      if (hasEpisodes) return true;
+      if (alreadyLoaded.length > 0) return alreadyLoaded;
 
       setLoadingSeriesId(seriesViewId);
       try {
@@ -723,19 +728,41 @@ const App = () => {
             return { ...playlist, items: nextItems, itemCount: nextItems.length, lastUpdatedAt: now() };
           }),
         }));
-        return true;
+        return episodes;
       } catch (error) {
         // The auto-load on restore is a background nicety — never surface a
         // network error banner for a request the user didn't ask for.
         if (!options?.silent) {
           setImportError(error instanceof Error ? error.message : "Failed to load series details.");
         }
-        return false;
+        return null;
       } finally {
         setLoadingSeriesId((current) => (current === seriesViewId ? null : current));
       }
     },
     [activePlaylist, setImportError],
+  );
+
+  /**
+   * Mark an entire series watched/unwatched straight from a list row, where its
+   * episodes are usually NOT loaded yet (they are fetched lazily and never
+   * persisted). Load them first, then mark — otherwise this would mark zero
+   * episodes and silently do nothing.
+   */
+  const handleSetSeriesWatched = useCallback(
+    async (seriesViewId: string, watched: boolean) => {
+      // Prefer episodes we already have. This is the ONLY path that works for
+      // non-Xtream (M3U) playlists, where every episode ships in the playlist
+      // and ensureSeriesLoaded deliberately refuses to run.
+      const known = allSeriesForPlaylist.find((show) => show.id === seriesViewId)?.episodes ?? [];
+      const episodes: PlaylistItem[] = known.length > 0 ? known : ((await ensureSeriesLoaded(seriesViewId)) ?? []);
+      if (episodes.length === 0) return;
+      setWatched(
+        episodes.map((episode) => ({ playlistId: episode.playlistId, itemId: episode.id })),
+        watched,
+      );
+    },
+    [allSeriesForPlaylist, ensureSeriesLoaded, setWatched],
   );
 
   // Cold-launch / deep-link restore plays an episode recovered from
@@ -765,10 +792,13 @@ const App = () => {
     if (!catalog) return;
 
     autoLoadedSeriesRef.current = parentSeriesId;
-    void ensureSeriesLoaded(catalog.id, { silent: true }).then((ok) => {
+    void ensureSeriesLoaded(catalog.id, { silent: true }).then((episodes) => {
       // Let a transient provider/relay failure retry on the next change rather
-      // than suppressing the bar for the rest of the session.
-      if (!ok && autoLoadedSeriesRef.current === parentSeriesId) autoLoadedSeriesRef.current = null;
+      // than suppressing the bar for the rest of the session. null = failed;
+      // an empty array is a real answer (series genuinely has no episodes).
+      if (episodes === null && autoLoadedSeriesRef.current === parentSeriesId) {
+        autoLoadedSeriesRef.current = null;
+      }
     });
   }, [activePlaylist, ensureSeriesLoaded, playerState.currentItem]);
 
@@ -1249,6 +1279,9 @@ const App = () => {
           void ensureSeriesLoaded(seriesId);
         }}
         onSetWatched={handleSetWatched}
+        onSetSeriesWatched={(seriesId, watched) => {
+          void handleSetSeriesWatched(seriesId, watched);
+        }}
       />
       <PlaylistImportModal
         open={importOpen}
