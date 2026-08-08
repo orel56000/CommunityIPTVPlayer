@@ -4,6 +4,7 @@ import clsx from "clsx";
 import type { EpisodeItem, PlaybackProgress, SeriesItem } from "../../types/models";
 import { useInfiniteList } from "../../hooks/useInfiniteList";
 import { formatShortDate } from "../../utils/time";
+import { nextWatchedTarget, watchedStateFor } from "../../utils/watchedState";
 
 interface SeriesBrowserProps {
   series: SeriesItem[];
@@ -15,6 +16,7 @@ interface SeriesBrowserProps {
   onSelectSeries: (seriesId: string | null) => void;
   onToggleFavoriteSeries: (seriesId: string) => void;
   onPlayEpisode: (episode: EpisodeItem) => void;
+  onSetWatched?: (episodes: EpisodeItem[], watched: boolean) => void;
 }
 
 const seasonKey = (episode: EpisodeItem): number => episode.season ?? 0;
@@ -29,6 +31,7 @@ export const SeriesBrowser = ({
   onSelectSeries,
   onToggleFavoriteSeries,
   onPlayEpisode,
+  onSetWatched,
 }: SeriesBrowserProps) => {
   const selectedSeries = useMemo(
     () => (selectedSeriesId ? series.find((show) => show.id === selectedSeriesId) ?? null : null),
@@ -46,6 +49,7 @@ export const SeriesBrowser = ({
         onPlay={onPlayEpisode}
         onBack={() => onSelectSeries(null)}
         onToggleFavorite={() => onToggleFavoriteSeries(selectedSeries.id)}
+        onSetWatched={onSetWatched}
       />
     );
   }
@@ -148,6 +152,8 @@ interface SeriesDetailViewProps {
   onPlay: (episode: EpisodeItem) => void;
   onBack: () => void;
   onToggleFavorite: () => void;
+  /** Mark a batch of episodes watched/unwatched. Omit to hide the controls. */
+  onSetWatched?: (episodes: EpisodeItem[], watched: boolean) => void;
 }
 
 export const SeriesDetailView = ({
@@ -159,6 +165,7 @@ export const SeriesDetailView = ({
   onPlay,
   onBack,
   onToggleFavorite,
+  onSetWatched,
 }: SeriesDetailViewProps) => {
   const seasons = useMemo(() => {
     const map = new Map<number, EpisodeItem[]>();
@@ -222,6 +229,23 @@ export const SeriesDetailView = ({
     }
   }, [scrollTargetId, activeSeason, show.id]);
 
+  const showWatched = useMemo(
+    () => watchedStateFor(show.episodes, progressByItemId),
+    [show.episodes, progressByItemId],
+  );
+  const currentSeasonWatched = useMemo(
+    () => watchedStateFor(currentSeason?.episodes ?? [], progressByItemId),
+    [currentSeason, progressByItemId],
+  );
+  const onToggleWatched = useMemo(
+    () =>
+      onSetWatched
+        ? (episode: EpisodeItem) =>
+            onSetWatched([episode], !progressByItemId.get(episode.id)?.completed)
+        : undefined,
+    [onSetWatched, progressByItemId],
+  );
+
   const firstEpisode = show.episodes[0];
   const nextUnwatched = useMemo(() => {
     for (const episode of show.episodes) {
@@ -258,6 +282,24 @@ export const SeriesDetailView = ({
           <Star size={14} className={isFavorite ? "fill-amber-300 text-amber-300" : ""} />
           {isFavorite ? "Unfavorite" : "Favorite"}
         </button>
+        {onSetWatched && show.episodes.length > 0 ? (
+          <button
+            type="button"
+            className="btn shrink-0"
+            onClick={() => onSetWatched(show.episodes, nextWatchedTarget(showWatched))}
+            title={
+              showWatched === "all"
+                ? "Mark every episode in this series as unwatched"
+                : "Mark every episode in this series as watched"
+            }
+          >
+            <CheckCircle2
+              size={14}
+              className={showWatched === "all" ? "fill-emerald-400/20 text-emerald-400" : ""}
+            />
+            {showWatched === "all" ? "Unwatch all" : "Mark all watched"}
+          </button>
+        ) : null}
         {nextUnwatched ? (
           <button type="button" className="btn btn-primary shrink-0" onClick={() => onPlay(nextUnwatched)}>
             <Play size={14} />
@@ -285,32 +327,70 @@ export const SeriesDetailView = ({
         <div className="space-y-3">
           {seasons.length > 1 ? (
             <div className="flex flex-wrap items-center gap-1 rounded-lg border border-slate-800 bg-slate-900/60 p-1">
-              {seasons.map(({ season, episodes }) => (
-                <button
-                  key={season}
-                  type="button"
-                  onClick={() => setActiveSeason(season)}
-                  className={clsx(
-                    "rounded-md px-3 py-1.5 text-xs font-medium transition",
-                    season === activeSeason
-                      ? "bg-cyan-500/20 text-cyan-100"
-                      : "text-slate-300 hover:bg-slate-800 hover:text-slate-100",
-                  )}
-                >
-                  Season {season}
-                  <span className="ml-1 text-[10px] text-slate-500">{episodes.length}</span>
-                </button>
-              ))}
+              {seasons.map(({ season, episodes }) => {
+                const state = watchedStateFor(episodes, progressByItemId);
+                return (
+                  <button
+                    key={season}
+                    type="button"
+                    onClick={() => setActiveSeason(season)}
+                    className={clsx(
+                      "flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition",
+                      season === activeSeason
+                        ? "bg-cyan-500/20 text-cyan-100"
+                        : "text-slate-300 hover:bg-slate-800 hover:text-slate-100",
+                    )}
+                  >
+                    {/* Indicator only — the tab itself switches seasons. The
+                        mark-season action lives in the list header below, so
+                        this never becomes a button inside a button. */}
+                    <CheckCircle2
+                      size={13}
+                      aria-hidden
+                      className={clsx(
+                        "shrink-0 transition",
+                        state === "all"
+                          ? "fill-emerald-400/20 text-emerald-400"
+                          : state === "partial"
+                            ? "text-emerald-400/50"
+                            : "text-slate-600 opacity-40",
+                      )}
+                    />
+                    <span>
+                      Season {season}
+                      <span className="ml-1 text-[10px] text-slate-500">{episodes.length}</span>
+                    </span>
+                  </button>
+                );
+              })}
             </div>
           ) : null}
 
           {currentSeason ? (
             <section className="panel p-3">
-              <div className="mb-2 flex items-center justify-between text-[11px] text-slate-500">
+              <div className="mb-2 flex items-center justify-between gap-2 text-[11px] text-slate-500">
                 <span>
                   {currentSeason.episodes.length} episode{currentSeason.episodes.length === 1 ? "" : "s"}
                 </span>
-                <span>scroll for more</span>
+                {onSetWatched && currentSeason.episodes.length > 0 ? (
+                  <button
+                    type="button"
+                    className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-slate-400 transition hover:bg-white/10 hover:text-slate-100"
+                    onClick={() =>
+                      onSetWatched(currentSeason.episodes, nextWatchedTarget(currentSeasonWatched))
+                    }
+                    title={
+                      currentSeasonWatched === "all"
+                        ? "Mark this whole season as unwatched"
+                        : "Mark this whole season as watched"
+                    }
+                  >
+                    <CheckCircle2 size={12} aria-hidden />
+                    {currentSeasonWatched === "all" ? "Unwatch season" : "Mark season watched"}
+                  </button>
+                ) : (
+                  <span>scroll for more</span>
+                )}
               </div>
               <div
                 ref={listRef}
@@ -330,37 +410,55 @@ export const SeriesDetailView = ({
                         key={episode.id}
                         ref={isScrollTarget ? scrollTargetRef : undefined}
                         aria-current={isSuggestedStart ? "true" : undefined}
+                        // The watched toggle is a sibling of the play button,
+                        // not nested inside it — a button cannot contain a
+                        // button, and nesting would also make the whole row
+                        // un-clickable for playback.
+                        className={clsx(
+                          "flex items-stretch gap-1 rounded-md transition",
+                          isActive
+                            ? "bg-cyan-500/20 text-cyan-100 ring-1 ring-cyan-400/50"
+                            : isSuggestedStart
+                              ? "border border-dashed border-slate-500/50 bg-slate-800/80 text-slate-100"
+                              : "bg-slate-900 hover:bg-slate-800",
+                        )}
                       >
                         <button
                           type="button"
-                          onClick={() => onPlay(episode)}
+                          onClick={() => onToggleWatched?.(episode)}
+                          disabled={!onToggleWatched}
+                          aria-pressed={isCompleted}
+                          aria-label={
+                            isCompleted
+                              ? `Mark S${episode.season ?? 0}E${episode.episode ?? 0} as unwatched`
+                              : `Mark S${episode.season ?? 0}E${episode.episode ?? 0} as watched`
+                          }
+                          title={isCompleted ? "Watched — click to unmark" : "Mark as watched"}
                           className={clsx(
-                            "flex w-full flex-col gap-1 rounded-md px-3 py-2 text-left text-sm transition",
-                            isActive
-                              ? "bg-cyan-500/20 text-cyan-100 ring-1 ring-cyan-400/50"
-                              : isSuggestedStart
-                                ? "border border-dashed border-slate-500/50 bg-slate-800/80 text-slate-100"
-                                : "bg-slate-900 hover:bg-slate-800",
+                            "flex shrink-0 items-center rounded-l-md pl-3 pr-1 transition",
+                            onToggleWatched && "hover:bg-white/10",
                           )}
                         >
+                          <CheckCircle2
+                            size={15}
+                            className={clsx(
+                              "transition",
+                              isCompleted
+                                ? "fill-emerald-400/20 text-emerald-400"
+                                : "text-slate-500 opacity-40 hover:opacity-100",
+                            )}
+                          />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => onPlay(episode)}
+                          className="flex min-w-0 flex-1 flex-col gap-1 rounded-r-md py-2 pl-1 pr-3 text-left text-sm"
+                        >
                           <div className="flex w-full items-center justify-between gap-2">
-                            <span className="flex min-w-0 items-center gap-2">
-                              {isCompleted ? (
-                                <CheckCircle2 size={14} className="shrink-0 text-emerald-400" aria-label="Watched" />
-                              ) : (
-                                <span
-                                  className={clsx(
-                                    "h-1.5 w-1.5 shrink-0 rounded-full",
-                                    ratio > 0 ? "bg-cyan-300" : "bg-slate-700",
-                                  )}
-                                  aria-hidden
-                                />
-                              )}
-                              <span className="line-clamp-1">
-                                S{episode.season ?? 0}E{episode.episode ?? 0}
-                                {"  "} - {"  "}
-                                {episode.title}
-                              </span>
+                            <span className="line-clamp-1 min-w-0">
+                              S{episode.season ?? 0}E{episode.episode ?? 0}
+                              {"  "} - {"  "}
+                              {episode.title}
                             </span>
                             <span className="flex shrink-0 items-center gap-2 text-[11px] text-slate-400">
                               {progress?.updatedAt ? <span>{formatShortDate(progress.updatedAt)}</span> : null}

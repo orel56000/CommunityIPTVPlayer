@@ -4,6 +4,7 @@ import { Analytics } from "@vercel/analytics/react";
 import type { AppSettings, UIFilters } from "./types/player";
 import type {
   ContinueWatchingEntry,
+  EpisodeItem,
   FavoriteEntry,
   PlaybackProgress,
   PlaylistItem,
@@ -285,7 +286,7 @@ const App = () => {
 
   const { favoriteSet, toggleFavorite, clearFavorites } = useFavorites(state.favorites, setFavorites);
   const { pushRecent, clearRecents } = useRecents(state.recents, setRecents);
-  const { updateProgress, clearContinueWatching, getResumePosition } = useContinueWatching(
+  const { updateProgress, setWatched, clearContinueWatching, getResumePosition } = useContinueWatching(
     state.continueWatching,
     setContinueWatching,
     state.progress,
@@ -297,6 +298,16 @@ const App = () => {
     for (const entry of state.progress) map.set(entry.itemId, entry);
     return map;
   }, [state.progress]);
+
+  const handleSetWatched = useCallback(
+    (episodes: EpisodeItem[], watched: boolean) => {
+      setWatched(
+        episodes.map((episode) => ({ playlistId: episode.playlistId, itemId: episode.id })),
+        watched,
+      );
+    },
+    [setWatched],
+  );
 
   const initialPlayerVolume = state.settings.rememberedVolume ?? state.settings.defaultVolume;
   const { playerState, setCurrentItem, setError, setPlaying, setVolume, setMuted } = usePlayer(initialPlayerVolume);
@@ -1237,6 +1248,7 @@ const App = () => {
         onEnsureSeriesLoaded={(seriesId) => {
           void ensureSeriesLoaded(seriesId);
         }}
+        onSetWatched={handleSetWatched}
       />
       <PlaylistImportModal
         open={importOpen}

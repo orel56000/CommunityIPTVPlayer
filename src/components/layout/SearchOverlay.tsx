@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import clsx from "clsx";
 import { ChevronRight, Search, Star, X } from "lucide-react";
-import type { PlaybackProgress, PlaylistItem, SeriesItem } from "../../types/models";
+import type { EpisodeItem, PlaybackProgress, PlaylistItem, SeriesItem } from "../../types/models";
 import { useDebouncedValue } from "../../hooks/useDebouncedValue";
 import { useInfiniteList } from "../../hooks/useInfiniteList";
 import { filterByQuery } from "../../utils/search";
@@ -74,6 +74,7 @@ interface SearchOverlayProps {
   onToggleFavorite: (item: PlaylistItem) => void;
   onToggleFavoriteSeries: (seriesId: string) => void;
   onEnsureSeriesLoaded: (seriesId: string) => void;
+  onSetWatched?: (episodes: EpisodeItem[], watched: boolean) => void;
   initialFocus?: SearchOpenFocus | null;
 }
 
@@ -95,6 +96,7 @@ export const SearchOverlay = ({
   onToggleFavorite,
   onToggleFavoriteSeries,
   onEnsureSeriesLoaded,
+  onSetWatched,
   initialFocus = null,
 }: SearchOverlayProps) => {
   const inputRef = useRef<HTMLInputElement>(null);
@@ -320,6 +322,7 @@ export const SearchOverlay = ({
               onPlay={handlePlayEpisode}
               onBack={() => setSelectedSeriesId(null)}
               onToggleFavorite={() => onToggleFavoriteSeries(selectedSeries.id)}
+              onSetWatched={onSetWatched}
             />
           ) : category === "settings" && settingsPanel ? (
             <div className="min-w-0 max-w-full">{settingsPanel}</div>
