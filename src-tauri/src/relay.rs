@@ -58,10 +58,22 @@ const REQUEST_RATE_WINDOW: Duration = Duration::from_secs(10);
 /// refusing keeps its per-IP limit permanently tripped, so playback can never
 /// recover. During the cool-down the relay answers locally and sends NOTHING
 /// upstream, which is what actually lets the limit reset.
-const RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(10);
+const RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(5);
 
 /// Never trust an absurd `Retry-After` from the provider — cap the stall.
 const RATE_LIMIT_COOLDOWN_MAX: Duration = Duration::from_secs(60);
+
+/// Longest a client request is HELD while a cool-down runs, instead of being
+/// failed straight away.
+///
+/// Failing instantly is what made this worse: a media element retries an error
+/// immediately, so a 0ms rejection became a a thousand-per-second busy loop
+/// that wedged playback. Holding the request is the brake the network round
+/// trip used to provide for free, and it self-limits concurrency, because the
+/// element only keeps a handful of sockets open per host. Best of all, the
+/// wait usually outlives the cool-down, so the request is then tried for real
+/// and playback resumes on its own instead of surfacing an error.
+const RATE_LIMIT_MAX_STALL: Duration = Duration::from_secs(5);
 
 /// How long to wait for the provider to START answering (i.e. send response
 /// headers) before giving up.
@@ -114,6 +126,9 @@ pub struct RelayState {
     /// `note_request`. One entry per distinct host ever seen; fine in practice
     /// since a session only ever talks to a handful of provider hosts.
     request_log: Arc<Mutex<HashMap<String, VecDeque<Instant>>>>,
+    /// Spreads the stampede when several held requests are released together
+    /// at the end of a cool-down.
+    stall_seq: Arc<AtomicU64>,
     /// Per-host cool-down deadline, armed when a provider answers 429. While
     /// set, requests to that host are refused locally instead of forwarded —
     /// see `RATE_LIMIT_COOLDOWN`. One entry per distinct host ever limited.
@@ -159,6 +174,7 @@ impl RelayState {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             starting: Arc::new(Mutex::new(HashMap::new())),
             request_log: Arc::new(Mutex::new(HashMap::new())),
+            stall_seq: Arc::new(AtomicU64::new(0)),
             rate_limited: Arc::new(Mutex::new(HashMap::new())),
             debug_log: Arc::new(Mutex::new(VecDeque::new())),
             debug_seq: Arc::new(AtomicU64::new(1)),
@@ -1096,27 +1112,43 @@ async fn stream(
     // load. Answer locally — the whole point is that nothing goes upstream
     // while the provider's per-IP limit is trying to reset.
     if let Some(remaining) = rate_limit_remaining(&state, &host).await {
+        // Hold the request rather than rejecting it instantly — see
+        // RATE_LIMIT_MAX_STALL. The jitter keeps everything that piled up
+        // during the cool-down from stampeding the provider in the same
+        // millisecond and re-tripping the limit immediately.
+        let waited = Instant::now();
+        let jitter = Duration::from_millis((state.stall_seq.fetch_add(1, Ordering::Relaxed) % 400) as u64);
         log::warn!(
-            "[stream] host={host} file={file} rate-limited, not forwarding ({}s left)",
+            "[stream] host={host} file={file} rate-limited, holding request ({}s left)",
             remaining.as_secs() + 1
         );
-        push_debug_log(
-            &state,
-            "relay",
-            "GET",
-            format!("{host}/{file}"),
-            Some(StatusCode::TOO_MANY_REQUESTS.as_u16()),
-            Some(0),
-            Some(format!("cooling down {}s — not sent upstream", remaining.as_secs() + 1)),
-        )
-        .await;
-        return cors_text(
-            StatusCode::TOO_MANY_REQUESTS,
-            format!(
-                "The provider is rate-limiting this connection. Pausing requests for {}s so it can recover.",
-                remaining.as_secs() + 1
-            ),
-        );
+        tokio::time::sleep(remaining.min(RATE_LIMIT_MAX_STALL) + jitter).await;
+
+        // Usually expired by now, so fall through and actually try it: the
+        // client gets video instead of an error and never notices the pause.
+        if let Some(still) = rate_limit_remaining(&state, &host).await {
+            push_debug_log(
+                &state,
+                "relay",
+                "GET",
+                format!("{host}/{file}"),
+                Some(StatusCode::TOO_MANY_REQUESTS.as_u16()),
+                Some(waited.elapsed().as_millis() as u64),
+                Some(format!(
+                    "held {}ms, still cooling down {}s — not sent upstream",
+                    waited.elapsed().as_millis(),
+                    still.as_secs() + 1
+                )),
+            )
+            .await;
+            return cors_text(
+                StatusCode::TOO_MANY_REQUESTS,
+                format!(
+                    "The provider is rate-limiting this connection. Pausing requests for {}s so it can recover.",
+                    still.as_secs() + 1
+                ),
+            );
+        }
     }
 
     let started = Instant::now();
@@ -2129,6 +2161,41 @@ mod tests {
         // A provider answering "retry immediately" while rate-limiting would
         // otherwise reproduce the exact storm this guard exists to stop.
         assert_eq!(parse_retry_after(Some("0")), None);
+    }
+
+    fn test_state() -> RelayState {
+        RelayState::new(PathBuf::from("ffmpeg"), None, None)
+    }
+
+    #[tokio::test]
+    async fn breaker_arms_expires_and_is_per_host() {
+        let state = test_state();
+        assert!(rate_limit_remaining(&state, "a.example").await.is_none());
+
+        let cooldown = note_rate_limited(&state, "a.example", Some("1")).await;
+        assert_eq!(cooldown, Duration::from_secs(1));
+        assert!(
+            rate_limit_remaining(&state, "a.example").await.is_some(),
+            "host must be cooling down right after a 429"
+        );
+        assert!(
+            rate_limit_remaining(&state, "b.example").await.is_none(),
+            "a limit on one provider must not block a different one"
+        );
+
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        assert!(
+            rate_limit_remaining(&state, "a.example").await.is_none(),
+            "cool-down must expire on its own so playback can resume"
+        );
+    }
+
+    #[tokio::test]
+    async fn breaker_without_retry_after_uses_the_default_cooldown() {
+        let state = test_state();
+        assert_eq!(note_rate_limited(&state, "c.example", None).await, RATE_LIMIT_COOLDOWN);
+        let remaining = rate_limit_remaining(&state, "c.example").await.expect("armed");
+        assert!(remaining <= RATE_LIMIT_COOLDOWN && remaining > Duration::from_secs(0));
     }
 
     #[test]
