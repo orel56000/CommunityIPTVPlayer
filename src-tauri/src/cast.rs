@@ -57,7 +57,11 @@ pub fn discover(timeout: Duration) -> Vec<CastDeviceInfo> {
                     .get_property_val_str("fn")
                     .map(str::to_string)
                     .unwrap_or_else(|| {
-                        info.get_fullname().split('.').next().unwrap_or("Chromecast").to_string()
+                        info.get_fullname()
+                            .split('.')
+                            .next()
+                            .unwrap_or("Chromecast")
+                            .to_string()
                     });
                 let model = info
                     .get_property_val_str("md")
@@ -68,7 +72,12 @@ pub fn discover(timeout: Duration) -> Vec<CastDeviceInfo> {
                 };
                 let host = ip.to_string();
                 if !out.iter().any(|d| d.host == host) {
-                    out.push(CastDeviceInfo { name, model, host, port: info.get_port() });
+                    out.push(CastDeviceInfo {
+                        name,
+                        model,
+                        host,
+                        port: info.get_port(),
+                    });
                 }
             }
             Ok(_) => {}
@@ -84,7 +93,12 @@ pub fn discover(timeout: Duration) -> Vec<CastDeviceInfo> {
 // ---------------------------------------------------------------------------
 
 pub enum CastCmd {
-    Load { url: String, content_type: String, title: Option<String>, live: bool },
+    Load {
+        url: String,
+        content_type: String,
+        title: Option<String>,
+        live: bool,
+    },
     Play,
     Pause,
     Seek(f32),
@@ -171,9 +185,15 @@ fn run_session(
         .receiver
         .launch_app(&CastDeviceApp::DefaultMediaReceiver)
         .map_err(err)?;
-    device.connection.connect(app.transport_id.as_str()).map_err(err)?;
+    device
+        .connection
+        .connect(app.transport_id.as_str())
+        .map_err(err)?;
     set_state(shared, "CONNECTED");
-    log::info!("[cast] connected to {host} (app session {})", app.session_id);
+    log::info!(
+        "[cast] connected to {host} (app session {})",
+        app.session_id
+    );
 
     let mut media_session_id: Option<i32> = None;
     let mut last_ping = Instant::now();
@@ -181,10 +201,19 @@ fn run_session(
 
     loop {
         match rx.recv_timeout(Duration::from_millis(500)) {
-            Ok(CastCmd::Load { url, content_type, title, live }) => {
+            Ok(CastCmd::Load {
+                url,
+                content_type,
+                title,
+                live,
+            }) => {
                 let media = Media {
                     content_id: url,
-                    stream_type: if live { StreamType::Live } else { StreamType::Buffered },
+                    stream_type: if live {
+                        StreamType::Live
+                    } else {
+                        StreamType::Buffered
+                    },
                     content_type,
                     metadata: title.map(|t| {
                         Metadata::Generic(GenericMediaMetadata {
@@ -229,7 +258,9 @@ fn run_session(
             Ok(CastCmd::Seek(t)) => {
                 if let Some(id) = media_session_id {
                     if let Ok(entry) =
-                        device.media.seek(app.transport_id.as_str(), id, Some(t), None)
+                        device
+                            .media
+                            .seek(app.transport_id.as_str(), id, Some(t), None)
                     {
                         apply_entry(shared, &entry);
                     }
