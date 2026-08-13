@@ -14,7 +14,7 @@
 //! The restream logic is a direct port of `api/restreamManager.ts`.
 
 use axum::{
-    body::Body,
+    body::{Body, Bytes},
     extract::{ConnectInfo, Path as AxumPath, Query, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
@@ -63,6 +63,33 @@ const RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(5);
 /// Never trust an absurd `Retry-After` from the provider — cap the stall.
 const RATE_LIMIT_COOLDOWN_MAX: Duration = Duration::from_secs(60);
 
+/// How long an aborted VOD request's provider connection stays parked for the
+/// next sequential range before being closed.
+///
+/// This is the heart of making the relay look like a TV app to the panel.
+/// WKWebView's media engine does NOT hold one connection open the way
+/// ExoPlayer/VLC do — it buffers a few MB, aborts the connection, and
+/// re-opens at the next byte, every 2-8s for the whole film. Each re-open
+/// used to be a fresh provider request (an aborted-mid-body connection can't
+/// be pooled), which is a sustained ~15-20 req/min the panel's frequency
+/// limiter eventually answers with block pages — during completely innocent
+/// sequential playback. Parking the connection and re-attaching the next
+/// range to it turns that churn into ONE long download upstream.
+const WARM_TTL: Duration = Duration::from_secs(15);
+
+/// How far AHEAD of a parked connection's position an attach may reach by
+/// reading-and-discarding from it. AVFoundation's startup dance jumps forward
+/// (~1MB observed) before settling into sequential reads; discarding a bounded
+/// gap from the live stream costs well under a second and saves a fresh
+/// provider connection at the moment the panel is most sensitive.
+const WARM_FORWARD_SKIP_MAX: u64 = 8 * 1024 * 1024;
+
+/// Tail of already-delivered bytes kept with a parked connection. The abort
+/// loses whatever sat in socket buffers, so the follow-up range usually
+/// starts slightly BEFORE the park point — the ring serves that overlap
+/// locally instead of failing the attach.
+const WARM_RING_MAX: usize = 16 * 1024 * 1024;
+
 /// Longest a client request is HELD while a cool-down runs, instead of being
 /// failed straight away.
 ///
@@ -110,6 +137,33 @@ struct DebugLogEntry {
     error: Option<String>,
 }
 
+/// A provider connection left alive after its client aborted, positioned at
+/// `pos`, plus a tail of already-delivered bytes (see WARM_RING_MAX).
+struct WarmStream {
+    url: String,
+    resp: reqwest::Response,
+    /// Offset of the next byte `resp` will yield.
+    pos: u64,
+    total: u64,
+    content_type: String,
+    /// Delivered tail covering [ring_start, pos).
+    ring: VecDeque<Bytes>,
+    ring_start: u64,
+    parked_at: Instant,
+}
+
+/// Everything spawn_pump needs to stream a (possibly resumed) VOD body.
+struct PumpSeed {
+    url: String,
+    resp: reqwest::Response,
+    /// Offset of the next byte `resp` yields; `prefix` covers [start, stream_pos).
+    stream_pos: u64,
+    prefix: VecDeque<Bytes>,
+    start: u64,
+    total: u64,
+    content_type: String,
+}
+
 #[derive(Clone)]
 pub struct RelayState {
     /// reqwest client reused across VOD requests (redirects, connection pool).
@@ -129,6 +183,9 @@ pub struct RelayState {
     /// Spreads the stampede when several held requests are released together
     /// at the end of a cool-down.
     stall_seq: Arc<AtomicU64>,
+    /// One parked upstream VOD connection (see WarmStream). A single slot on
+    /// purpose: the relay must never hold more than one idle provider socket.
+    warm: Arc<Mutex<Option<WarmStream>>>,
     /// Per-host cool-down deadline, armed when a provider answers 429. While
     /// set, requests to that host are refused locally instead of forwarded —
     /// see `RATE_LIMIT_COOLDOWN`. One entry per distinct host ever limited.
@@ -174,6 +231,7 @@ impl RelayState {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             starting: Arc::new(Mutex::new(HashMap::new())),
             request_log: Arc::new(Mutex::new(HashMap::new())),
+            warm: Arc::new(Mutex::new(None)),
             stall_seq: Arc::new(AtomicU64::new(0)),
             rate_limited: Arc::new(Mutex::new(HashMap::new())),
             debug_log: Arc::new(Mutex::new(VecDeque::new())),
@@ -260,6 +318,216 @@ async fn note_rate_limited(state: &RelayState, host: &str, retry_after: Option<&
         .await
         .insert(host.to_string(), Instant::now() + cooldown);
     cooldown
+}
+
+/// `bytes=S-` -> (S, None); `bytes=S-E` -> (S, Some(E)). Suffix, multi-part
+/// and malformed ranges return None and are sent upstream untouched.
+///
+/// Both shapes matter: WKWebView/AVFoundation mostly requests
+/// `bytes=S-<lastByte>` (bounded to end of file), NOT the open-ended form —
+/// treating only `bytes=S-` as sequential made warm retention never engage.
+fn parse_range(range: &str) -> Option<(u64, Option<u64>)> {
+    let rest = range.trim().strip_prefix("bytes=")?;
+    let (start, end) = rest.split_once('-')?;
+    if start.is_empty() {
+        return None; // suffix range `bytes=-500`
+    }
+    let start: u64 = start.parse().ok()?;
+    if end.is_empty() {
+        return Some((start, None));
+    }
+    let end: u64 = end.parse().ok()?; // multi-part `0-1, 5-` fails here
+    Some((start, Some(end)))
+}
+
+/// `bytes A-B/T` -> Some((A, B, T)). A `*` total returns None — without a
+/// real total the relay cannot synthesize Content-Range for a resumed stream.
+fn parse_content_range(value: &str) -> Option<(u64, u64, u64)> {
+    let rest = value.trim().strip_prefix("bytes ")?;
+    let (range, total) = rest.split_once('/')?;
+    let total: u64 = total.trim().parse().ok()?;
+    let (start, end) = range.split_once('-')?;
+    let start: u64 = start.trim().parse().ok()?;
+    let end: u64 = end.trim().parse().ok()?;
+    Some((start, end, total))
+}
+
+/// The ring bytes from `start` onward (ring covers [ring_start, ...)).
+fn ring_suffix(ring: VecDeque<Bytes>, ring_start: u64, start: u64) -> VecDeque<Bytes> {
+    let mut out = VecDeque::new();
+    let mut off = ring_start;
+    for chunk in ring {
+        let end = off + chunk.len() as u64;
+        if end > start {
+            let skip = start.saturating_sub(off) as usize;
+            out.push_back(if skip == 0 { chunk } else { chunk.slice(skip..) });
+        }
+        off = end;
+    }
+    out
+}
+
+/// The ring bytes covering the CLOSED interval [start, end], as slices.
+/// Caller guarantees start >= ring_start and end < the ring's end offset.
+fn ring_slice(ring: &VecDeque<Bytes>, ring_start: u64, start: u64, end: u64) -> Vec<Bytes> {
+    let mut out = Vec::new();
+    let mut off = ring_start;
+    for chunk in ring {
+        let cend = off + chunk.len() as u64; // exclusive
+        if cend > start && off <= end {
+            let s = start.saturating_sub(off) as usize;
+            let e = ((end + 1).min(cend) - off) as usize;
+            out.push(chunk.slice(s..e));
+        }
+        off = cend;
+    }
+    out
+}
+
+fn push_ring(ring: &mut VecDeque<Bytes>, ring_bytes: &mut usize, ring_start: &mut u64, chunk: Bytes) {
+    *ring_bytes += chunk.len();
+    ring.push_back(chunk);
+    while *ring_bytes > WARM_RING_MAX && ring.len() > 1 {
+        if let Some(front) = ring.pop_front() {
+            *ring_bytes -= front.len();
+            *ring_start += front.len() as u64;
+        }
+    }
+}
+
+/// Stream `seed` to the client. If the client aborts mid-body (WebKit does,
+/// every few MB), the still-open provider connection is PARKED in
+/// `state.warm` for the follow-up range instead of dropped.
+fn spawn_pump(state: RelayState, seed: PumpSeed) -> Body {
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(8);
+    tokio::spawn(async move {
+        let PumpSeed { url, mut resp, mut stream_pos, prefix, start, total, content_type } = seed;
+        let mut ring: VecDeque<Bytes> = VecDeque::new();
+        let mut ring_bytes: usize = 0;
+        let mut ring_start: u64 = start;
+        let mut aborted = false;
+
+        for chunk in prefix {
+            // Ring first, UNCONDITIONALLY — even after the client vanishes.
+            // The parked invariant is "ring covers [ring_start, pos)"; if an
+            // abort mid-replay dropped the unsent prefix chunks, the re-park
+            // would have a silent hole and the next attach would hand the
+            // decoder corrupted bytes inside a well-formed 206.
+            push_ring(&mut ring, &mut ring_bytes, &mut ring_start, chunk.clone());
+            if !aborted && tx.send(Ok(chunk)).await.is_err() {
+                aborted = true;
+            }
+        }
+        // Forward-skip: the attach point is ahead of the parked position —
+        // read and discard the gap from the live stream (bounded by
+        // WARM_FORWARD_SKIP_MAX at attach time) instead of paying for a new
+        // provider connection. Bytes before `start` are never sent nor rung.
+        while !aborted && stream_pos < start {
+            // `biased` + tx.closed(): the client can vanish while we're blocked
+            // on the provider. Without this, the abort goes unnoticed until the
+            // next chunk arrives — possibly never on a stalled upstream — which
+            // both leaks this task and misses the park entirely.
+            let chunk = tokio::select! {
+                biased;
+                _ = tx.closed() => {
+                    aborted = true;
+                    break;
+                }
+                c = resp.chunk() => c,
+            };
+            match chunk {
+                Ok(Some(chunk)) => {
+                    let clen = chunk.len() as u64;
+                    if stream_pos + clen <= start {
+                        stream_pos += clen;
+                        continue;
+                    }
+                    let keep = chunk.slice((start - stream_pos) as usize..);
+                    stream_pos += clen;
+                    push_ring(&mut ring, &mut ring_bytes, &mut ring_start, keep.clone());
+                    if tx.send(Ok(keep)).await.is_err() {
+                        aborted = true;
+                    }
+                }
+                // EOF/error inside the gap: nothing was sent; the client sees
+                // a truncated body and simply re-requests fresh.
+                Ok(None) => return,
+                Err(e) => {
+                    let _ = tx.send(Err(std::io::Error::new(std::io::ErrorKind::Other, e))).await;
+                    return;
+                }
+            }
+        }
+        if !aborted {
+            loop {
+                let chunk = tokio::select! {
+                    biased;
+                    _ = tx.closed() => {
+                        aborted = true;
+                        break;
+                    }
+                    c = resp.chunk() => c,
+                };
+                match chunk {
+                    Ok(Some(chunk)) => {
+                        stream_pos += chunk.len() as u64;
+                        push_ring(&mut ring, &mut ring_bytes, &mut ring_start, chunk.clone());
+                        if tx.send(Ok(chunk)).await.is_err() {
+                            aborted = true;
+                            break;
+                        }
+                    }
+                    // Fully drained — the connection finished its job.
+                    Ok(None) => return,
+                    Err(e) => {
+                        // Upstream broke mid-stream; nothing worth parking.
+                        let _ = tx.send(Err(std::io::Error::new(std::io::ErrorKind::Other, e))).await;
+                        return;
+                    }
+                }
+            }
+        }
+        if aborted && stream_pos < total {
+            // An abort before any byte was kept (mid-discard) leaves ring_start
+            // ahead of stream_pos; normalize so the invariant stays exactly
+            // "ring covers [ring_start, pos)".
+            let ring_start = if ring.is_empty() { stream_pos } else { ring_start };
+            log::info!("[stream] client aborted at {stream_pos}/{total} — parking upstream connection for reuse");
+            *state.warm.lock().await = Some(WarmStream {
+                url,
+                resp,
+                pos: stream_pos,
+                total,
+                content_type,
+                ring,
+                ring_start,
+                parked_at: Instant::now(),
+            });
+        }
+    });
+    Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx))
+}
+
+/// Serve bytes [start, total) from a parked connection already taken out of
+/// the slot. The caller has verified the offsets line up.
+fn warm_attach(state: &RelayState, warm: WarmStream, start: u64, host: &str, file: &str) -> Option<Response> {
+    let WarmStream { url, resp, pos, total, content_type, ring, ring_start, .. } = warm;
+    log::info!("[stream] warm-attach host={host} file={file} offset={start}/{total} — nothing sent upstream");
+    let prefix = ring_suffix(ring, ring_start, start);
+    let ct = content_type.clone();
+    let body = spawn_pump(
+        state.clone(),
+        PumpSeed { url, resp, stream_pos: pos, prefix, start, total, content_type },
+    );
+    Response::builder()
+        .status(StatusCode::PARTIAL_CONTENT)
+        .header(header::CONTENT_TYPE, ct)
+        .header(header::CONTENT_LENGTH, (total - start).to_string())
+        .header(header::CONTENT_RANGE, format!("bytes {}-{}/{}", start, total - 1, total))
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header(header::CACHE_CONTROL, "private, max-age=3600")
+        .body(body)
+        .ok()
 }
 
 /// Provider host for a source url, used only for logging (never the full URL —
@@ -384,11 +652,18 @@ pub fn router(
     // Spawn the idle-session reaper (mirrors restreamManager's setInterval).
     {
         let sessions = state.sessions.clone();
+        let warm = state.warm.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(30));
             loop {
                 tick.tick().await;
                 reap_idle(&sessions).await;
+                // Close a parked provider connection nobody came back for.
+                let mut slot = warm.lock().await;
+                if matches!(slot.as_ref(), Some(w) if w.parked_at.elapsed() > WARM_TTL) {
+                    log::info!("[stream] parked connection expired — closing");
+                    *slot = None;
+                }
             }
         });
     }
@@ -1108,6 +1383,119 @@ async fn stream(
         .and_then(|s| s.last())
         .unwrap_or("?")
         .to_string();
+    let path_lower = target.path().to_ascii_lowercase();
+    let vod_media = [".mp4", ".mkv", ".avi", ".mov", ".m4v", ".webm", ".mp3", ".aac", ".flac"]
+        .iter()
+        .any(|ext| path_lower.ends_with(ext));
+
+    // Try the parked connection first — a warm attach costs the provider
+    // NOTHING, so it is allowed even mid-cool-down, which is exactly when it
+    // matters most: sequential playback keeps flowing while the limit resets.
+    let client_range = headers
+        .get(header::RANGE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(parse_range);
+    if vod_media {
+        enum WarmPlan {
+            Attach(Box<WarmStream>, u64),
+            /// Bounded read wholly inside the parked ring: (bytes, start, end, total, content_type)
+            FromRing(Vec<Bytes>, u64, u64, u64, String),
+            Fresh,
+        }
+        let plan = {
+            let mut slot = state.warm.lock().await;
+            match (slot.as_ref(), client_range) {
+                (None, _) => WarmPlan::Fresh,
+                (Some(w), _) if w.url != target.as_str() || w.parked_at.elapsed() > WARM_TTL => {
+                    // Item switch or expiry: close it before opening anything new.
+                    log::info!("[stream] dropped parked connection (stale) host={host}");
+                    *slot = None;
+                    WarmPlan::Fresh
+                }
+                (Some(w), Some((start, end))) => {
+                    // "Sequential" = runs to end-of-file: the open-ended form
+                    // OR bounded exactly to the last byte, which is what
+                    // AVFoundation actually sends.
+                    let sequential = end.is_none() || end == Some(w.total - 1);
+                    if sequential
+                        && start >= w.ring_start
+                        && start < w.total
+                        && start <= w.pos + WARM_FORWARD_SKIP_MAX
+                    {
+                        WarmPlan::Attach(Box::new(slot.take().expect("checked above")), start)
+                    } else if sequential {
+                        // A real seek: the parked stream is at the wrong offset.
+                        log::info!("[stream] dropped parked connection (seek) host={host}");
+                        *slot = None;
+                        WarmPlan::Fresh
+                    } else if let Some(endv) = end {
+                        if start >= w.ring_start && start <= endv && endv < w.pos {
+                            // Bounded read of bytes we still hold: answer from
+                            // memory and leave the park untouched.
+                            WarmPlan::FromRing(
+                                ring_slice(&w.ring, w.ring_start, start, endv),
+                                start,
+                                endv,
+                                w.total,
+                                w.content_type.clone(),
+                            )
+                        } else {
+                            // Bounded mid-file read (moov/index probe) outside
+                            // the ring: serve it fresh but KEEP the parked
+                            // stream — these interleave with sequential reads,
+                            // and killing the park for each one would make
+                            // retention useless.
+                            WarmPlan::Fresh
+                        }
+                    } else {
+                        WarmPlan::Fresh
+                    }
+                }
+                (Some(_), None) => {
+                    // Full-file GET replaces the stream entirely.
+                    *slot = None;
+                    WarmPlan::Fresh
+                }
+            }
+        };
+        match plan {
+            WarmPlan::Attach(w, start) => {
+                if let Some(resp) = warm_attach(&state, *w, start, &host, &file) {
+                    return resp;
+                }
+            }
+            WarmPlan::FromRing(chunks, start, end, total, ct) => {
+                log::info!(
+                    "[stream] ring-serve host={host} file={file} bytes={start}-{end} — nothing sent upstream"
+                );
+                let mut buf = Vec::with_capacity((end - start + 1) as usize);
+                for c in chunks {
+                    buf.extend_from_slice(&c);
+                }
+                if let Ok(resp) = Response::builder()
+                    .status(StatusCode::PARTIAL_CONTENT)
+                    .header(header::CONTENT_TYPE, ct)
+                    .header(header::CONTENT_LENGTH, buf.len().to_string())
+                    .header(header::CONTENT_RANGE, format!("bytes {start}-{end}/{total}"))
+                    .header(header::ACCEPT_RANGES, "bytes")
+                    .header(header::CACHE_CONTROL, "private, max-age=3600")
+                    .body(Body::from(buf))
+                {
+                    return resp;
+                }
+            }
+            WarmPlan::Fresh => {}
+        }
+    }
+
+    // Live playback replaces VOD entirely — release any parked VOD socket
+    // BEFORE the direct-ts stream opens its own provider connection, or the
+    // two would briefly count together against the panel's (often single-slot)
+    // per-IP limit.
+    if path_lower.ends_with(".ts") && state.warm.lock().await.take().is_some() {
+        log::info!("[stream] dropped parked connection (live playback starting) host={host}");
+    }
+
     // Circuit breaker: this host recently answered 429, so do NOT add to its
     // load. Answer locally — the whole point is that nothing goes upstream
     // while the provider's per-IP limit is trying to reset.
@@ -1158,7 +1546,10 @@ async fn stream(
         Err(_) => {
             // Connected but never answered. Dropping the future here closes the
             // socket, which is the whole point: hand the slot back instead of
-            // holding it hostage.
+            // holding it hostage. A hang IS the panel throttling us, so arm
+            // the same cool-down a 429 would — each retry would otherwise hold
+            // a provider slot hostage for the full timeout.
+            let _ = note_rate_limited(&state, &host, None).await;
             log::warn!(
                 "[stream] TIMEOUT host={host} file={file} — no response headers in {}s ({burst} reqs/{}s)",
                 UPSTREAM_HEADERS_TIMEOUT.as_secs(),
@@ -1210,8 +1601,12 @@ async fn stream(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("-")
         .to_string();
+    let range_dbg = headers
+        .get(header::RANGE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("-");
     log::info!(
-        "[stream] {} host={host} file={file} type={content_type:?} len={:?} in {}ms ({burst} reqs/{}s)",
+        "[stream] {} host={host} file={file} range={range_dbg} type={content_type:?} len={:?} in {}ms ({burst} reqs/{}s)",
         status.as_u16(),
         upstream
             .headers()
@@ -1254,11 +1649,6 @@ async fn stream(
             ),
         );
     }
-
-    let path_lower = target.path().to_ascii_lowercase();
-    let vod_media = [".mp4", ".mkv", ".avi", ".mov", ".m4v", ".webm", ".mp3", ".aac", ".flac"]
-        .iter()
-        .any(|ext| path_lower.ends_with(ext));
 
     // XUI-style panels answer a media URL with an HTML block page when the
     // per-IP connection/rate limit trips. Piping that into <video> yields an
@@ -1315,6 +1705,38 @@ async fn stream(
         builder = builder.header(header::CACHE_CONTROL, "private, max-age=3600");
     }
 
+    // Warm retention: pump open-ended VOD 206 bodies ourselves so a client
+    // abort parks the provider connection for the next sequential range
+    // instead of tearing it down (see WARM_TTL for why that matters).
+    if vod_media && status == StatusCode::PARTIAL_CONTENT {
+        let range_info = upstream
+            .headers()
+            .get(header::CONTENT_RANGE)
+            .and_then(|v| v.to_str().ok())
+            .and_then(parse_content_range);
+        // Only park streams that run to end-of-file — bounded mid-file index
+        // reads finish in one gulp and leave nothing worth keeping.
+        if let Some((range_start, range_end, total)) = range_info.filter(|(_, e, t)| e + 1 == *t) {
+            let _ = range_end;
+            let body = spawn_pump(
+                state.clone(),
+                PumpSeed {
+                    url: target.as_str().to_string(),
+                    resp: upstream,
+                    stream_pos: range_start,
+                    prefix: VecDeque::new(),
+                    start: range_start,
+                    total,
+                    content_type: content_type.clone(),
+                },
+            );
+            return match builder.body(body) {
+                Ok(resp) => resp,
+                Err(e) => cors_text(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+            };
+        }
+    }
+
     match builder.body(Body::from_stream(upstream.bytes_stream())) {
         Ok(resp) => resp,
         Err(e) => cors_text(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
@@ -1330,6 +1752,11 @@ async fn restream_manifest(State(state): State<RelayState>, Query(q): Query<UrlQ
         Ok(t) => t,
         Err((status, msg)) => return cors_text(status, msg),
     };
+    // Live restream replaces VOD — release any parked VOD socket before
+    // ffmpeg opens its provider connection (see the same clear in stream()).
+    if state.warm.lock().await.take().is_some() {
+        log::info!("[restream] dropped parked VOD connection (live restream starting)");
+    }
     // Live source must be an Xtream MPEG-TS (.ts) URL; never re-introduce .m3u8.
     let path = target.path().to_lowercase();
     if !path.ends_with(".ts") {
@@ -2196,6 +2623,67 @@ mod tests {
         assert_eq!(note_rate_limited(&state, "c.example", None).await, RATE_LIMIT_COOLDOWN);
         let remaining = rate_limit_remaining(&state, "c.example").await.expect("armed");
         assert!(remaining <= RATE_LIMIT_COOLDOWN && remaining > Duration::from_secs(0));
+    }
+
+    #[test]
+    fn range_parsing() {
+        assert_eq!(parse_range("bytes=0-"), Some((0, None)));
+        assert_eq!(parse_range("bytes=851968-"), Some((851968, None)));
+        // AVFoundation's usual shape: bounded to the file's last byte.
+        assert_eq!(parse_range("bytes=851968-1056877142"), Some((851968, Some(1056877142))));
+        assert_eq!(parse_range("bytes=0-1"), Some((0, Some(1))));
+        // Suffix and multi-part ranges must go upstream untouched.
+        assert_eq!(parse_range("bytes=-500"), None);
+        assert_eq!(parse_range("bytes=0-1, 100-"), None);
+        assert_eq!(parse_range("chunks=0-"), None);
+    }
+
+    #[test]
+    fn content_range_parsing() {
+        assert_eq!(parse_content_range("bytes 0-959616198/959616199"), Some((0, 959616198, 959616199)));
+        assert_eq!(
+            parse_content_range("bytes 851968-959616198/959616199"),
+            Some((851968, 959616198, 959616199))
+        );
+        // Unknown total: cannot synthesize resumed-stream headers later.
+        assert_eq!(parse_content_range("bytes 0-100/*"), None);
+        assert_eq!(parse_content_range("garbage"), None);
+    }
+
+    #[test]
+    fn ring_suffix_slices_from_the_requested_offset() {
+        let ring: VecDeque<Bytes> = VecDeque::from(vec![
+            Bytes::from_static(b"aaaa"), // [100, 104)
+            Bytes::from_static(b"bbbb"), // [104, 108)
+        ]);
+        let flat = |v: VecDeque<Bytes>| {
+            v.into_iter().fold(Vec::new(), |mut acc, b| {
+                acc.extend_from_slice(&b);
+                acc
+            })
+        };
+        assert_eq!(flat(ring_suffix(ring.clone(), 100, 100)), b"aaaabbbb");
+        assert_eq!(flat(ring_suffix(ring.clone(), 100, 102)), b"aabbbb");
+        assert_eq!(flat(ring_suffix(ring.clone(), 100, 104)), b"bbbb");
+        assert_eq!(flat(ring_suffix(ring, 100, 108)), b"");
+    }
+
+    #[test]
+    fn ring_slice_returns_exactly_the_closed_interval() {
+        let ring: VecDeque<Bytes> = VecDeque::from(vec![
+            Bytes::from_static(b"aaaa"), // [100, 104)
+            Bytes::from_static(b"bbbb"), // [104, 108)
+        ]);
+        let flat = |v: Vec<Bytes>| {
+            v.into_iter().fold(Vec::new(), |mut acc, b| {
+                acc.extend_from_slice(&b);
+                acc
+            })
+        };
+        assert_eq!(flat(ring_slice(&ring, 100, 100, 107)), b"aaaabbbb");
+        assert_eq!(flat(ring_slice(&ring, 100, 102, 105)), b"aabb");
+        assert_eq!(flat(ring_slice(&ring, 100, 104, 104)), b"b");
+        assert_eq!(flat(ring_slice(&ring, 100, 100, 100)), b"a");
     }
 
     #[test]
