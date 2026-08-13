@@ -90,6 +90,36 @@ const WARM_FORWARD_SKIP_MAX: u64 = 8 * 1024 * 1024;
 /// locally instead of failing the attach.
 const WARM_RING_MAX: usize = 16 * 1024 * 1024;
 
+/// Total budget for holding a client request across REPEATED cool-downs.
+/// A single 5s stall wasn't enough when a burst re-armed the breaker
+/// mid-hold: the request was then failed with a 429, which the media element
+/// treats as fatal ("Load failed") even though the limit cleared a second
+/// later. Riding it out up to this long converts that hard failure into a
+/// slightly slow response.
+const RATE_LIMIT_TOTAL_STALL: Duration = Duration::from_secs(15);
+
+/// Minimum spacing between FRESH media requests to one host. A seek makes
+/// AVFoundation stampede 3-4 concurrent range opens in the same instant;
+/// panels read that as abuse. Spacing them ~4/s changes nothing for the
+/// player (each fetch takes ~500ms anyway) but keeps the burst under the
+/// panel's trigger.
+const FRESH_SEND_SPACING: Duration = Duration::from_millis(250);
+
+/// Hard cap on how far the spacing tail may reach past "now". Reservations
+/// are made before sleeping and a cancelled request never gives its slot
+/// back, so without this cap a scrub-storm (arrive-and-abort faster than
+/// 4/s) would push the tail seconds into the future and the eventual winning
+/// request would sit in pure dead air. Bounding the tail bounds the worst
+/// case at one extra ~750ms, degrading spacing gracefully under storms
+/// instead of freezing playback.
+const FRESH_SEND_TAIL_CAP: Duration = Duration::from_millis(750);
+
+/// Bounded (moov/index) reads a seek re-issues are byte-identical every
+/// time. Cache small bounded responses per item so repeat seeks cost the
+/// provider nothing.
+const BOUNDED_CACHE_ENTRY_MAX: usize = 2 * 1024 * 1024;
+const BOUNDED_CACHE_TOTAL_MAX: usize = 64 * 1024 * 1024;
+
 /// Longest a client request is HELD while a cool-down runs, instead of being
 /// failed straight away.
 ///
@@ -135,6 +165,61 @@ struct DebugLogEntry {
     status: Option<u16>,
     duration_ms: Option<u64>,
     error: Option<String>,
+}
+
+/// Per-item cache of small bounded 206 responses (the moov/index probes a
+/// seek re-issues verbatim). Single item at a time, like the warm slot.
+struct BoundedCache {
+    url: String,
+    total: u64,
+    content_type: String,
+    map: HashMap<(u64, u64), Bytes>,
+    /// LRU order, most recent at the back.
+    order: VecDeque<(u64, u64)>,
+    bytes: usize,
+}
+
+impl BoundedCache {
+    fn new(url: String, total: u64, content_type: String) -> Self {
+        Self { url, total, content_type, map: HashMap::new(), order: VecDeque::new(), bytes: 0 }
+    }
+
+    fn insert(&mut self, key: (u64, u64), data: Bytes) {
+        if data.len() > BOUNDED_CACHE_ENTRY_MAX || self.map.contains_key(&key) {
+            return;
+        }
+        self.bytes += data.len();
+        self.map.insert(key, data);
+        self.order.push_back(key);
+        while self.bytes > BOUNDED_CACHE_TOTAL_MAX {
+            if let Some(old) = self.order.pop_front() {
+                if let Some(evicted) = self.map.remove(&old) {
+                    self.bytes -= evicted.len();
+                }
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn get(&mut self, key: (u64, u64)) -> Option<Bytes> {
+        let hit = self.map.get(&key)?.clone();
+        // Touch for LRU.
+        if let Some(idx) = self.order.iter().position(|k| *k == key) {
+            self.order.remove(idx);
+            self.order.push_back(key);
+        }
+        Some(hit)
+    }
+}
+
+/// Cool-down after the Nth consecutive headers-timeout to one host. A hang is
+/// the panel throttling; pausing a flat 5s just produced another 12s hang
+/// (observed repeatedly). Back off exponentially instead: 5s, 10s, 20s, 40s,
+/// capped at 60s. Any real response resets the streak.
+fn timeout_cooldown(streak: u32) -> Duration {
+    let factor = 1u32 << streak.saturating_sub(1).min(4);
+    (RATE_LIMIT_COOLDOWN * factor).min(RATE_LIMIT_COOLDOWN_MAX)
 }
 
 /// A provider connection left alive after its client aborted, positioned at
@@ -183,6 +268,12 @@ pub struct RelayState {
     /// Spreads the stampede when several held requests are released together
     /// at the end of a cool-down.
     stall_seq: Arc<AtomicU64>,
+    /// Cached bounded 206 responses for the current item (see BoundedCache).
+    bounded_cache: Arc<Mutex<Option<BoundedCache>>>,
+    /// Consecutive headers-timeouts per host, for exponential backoff.
+    timeout_streak: Arc<Mutex<HashMap<String, u32>>>,
+    /// Last fresh-media-send instant per host, for FRESH_SEND_SPACING.
+    last_send: Arc<Mutex<HashMap<String, Instant>>>,
     /// One parked upstream VOD connection (see WarmStream). A single slot on
     /// purpose: the relay must never hold more than one idle provider socket.
     warm: Arc<Mutex<Option<WarmStream>>>,
@@ -231,6 +322,9 @@ impl RelayState {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             starting: Arc::new(Mutex::new(HashMap::new())),
             request_log: Arc::new(Mutex::new(HashMap::new())),
+            bounded_cache: Arc::new(Mutex::new(None)),
+            timeout_streak: Arc::new(Mutex::new(HashMap::new())),
+            last_send: Arc::new(Mutex::new(HashMap::new())),
             warm: Arc::new(Mutex::new(None)),
             stall_seq: Arc::new(AtomicU64::new(0)),
             rate_limited: Arc::new(Mutex::new(HashMap::new())),
@@ -1488,6 +1582,40 @@ async fn stream(
         }
     }
 
+    // Repeat bounded reads (moov/index probes) are byte-identical across
+    // seeks — serve them from the per-item cache instead of the provider.
+    // This is what turns the 2nd..Nth seek from a request burst into ~one
+    // request.
+    if vod_media {
+        if let Some((start, Some(end))) = client_range {
+            let cached = {
+                let mut slot = state.bounded_cache.lock().await;
+                match slot.as_mut() {
+                    Some(c) if c.url == target.as_str() => {
+                        c.get((start, end)).map(|b| (b, c.total, c.content_type.clone()))
+                    }
+                    _ => None,
+                }
+            };
+            if let Some((bytes, total, ct)) = cached {
+                log::info!(
+                    "[stream] cache-serve host={host} file={file} bytes={start}-{end} — nothing sent upstream"
+                );
+                if let Ok(resp) = Response::builder()
+                    .status(StatusCode::PARTIAL_CONTENT)
+                    .header(header::CONTENT_TYPE, ct)
+                    .header(header::CONTENT_LENGTH, bytes.len().to_string())
+                    .header(header::CONTENT_RANGE, format!("bytes {start}-{end}/{total}"))
+                    .header(header::ACCEPT_RANGES, "bytes")
+                    .header(header::CACHE_CONTROL, "private, max-age=3600")
+                    .body(Body::from(bytes))
+                {
+                    return resp;
+                }
+            }
+        }
+    }
+
     // Live playback replaces VOD entirely — release any parked VOD socket
     // BEFORE the direct-ts stream opens its own provider connection, or the
     // two would briefly count together against the panel's (often single-slot)
@@ -1499,20 +1627,34 @@ async fn stream(
     // Circuit breaker: this host recently answered 429, so do NOT add to its
     // load. Answer locally — the whole point is that nothing goes upstream
     // while the provider's per-IP limit is trying to reset.
-    if let Some(remaining) = rate_limit_remaining(&state, &host).await {
-        // Hold the request rather than rejecting it instantly — see
-        // RATE_LIMIT_MAX_STALL. The jitter keeps everything that piled up
-        // during the cool-down from stampeding the provider in the same
-        // millisecond and re-tripping the limit immediately.
+    if rate_limit_remaining(&state, &host).await.is_some() {
+        // Hold the request rather than rejecting it instantly, looping across
+        // RE-ARMS: a burst can re-trip the breaker while we wait, and failing
+        // then hands the media element a 429 it treats as fatal ("Load
+        // failed") one second before the limit clears. The jitter keeps the
+        // piled-up requests from stampeding out in the same millisecond.
         let waited = Instant::now();
-        let jitter = Duration::from_millis((state.stall_seq.fetch_add(1, Ordering::Relaxed) % 400) as u64);
-        log::warn!(
-            "[stream] host={host} file={file} rate-limited, holding request ({}s left)",
-            remaining.as_secs() + 1
-        );
-        tokio::time::sleep(remaining.min(RATE_LIMIT_MAX_STALL) + jitter).await;
+        let deadline = waited + RATE_LIMIT_TOTAL_STALL;
+        while let Some(remaining) = rate_limit_remaining(&state, &host).await {
+            // A cool-down that cannot possibly expire within the stall budget
+            // (the exponential timeout backoffs reach 60s) is not worth
+            // holding for: stalling ~10s and THEN failing is the worst of
+            // both. Fail fast instead so the player can show its error and
+            // retry on its own schedule.
+            if Instant::now() + remaining > deadline {
+                break;
+            }
+            let jitter =
+                Duration::from_millis((state.stall_seq.fetch_add(1, Ordering::Relaxed) % 400) as u64);
+            let nap = remaining.min(RATE_LIMIT_MAX_STALL) + jitter;
+            log::warn!(
+                "[stream] host={host} file={file} rate-limited, holding request ({}s left)",
+                remaining.as_secs() + 1
+            );
+            tokio::time::sleep(nap).await;
+        }
 
-        // Usually expired by now, so fall through and actually try it: the
+        // Usually free by now, so fall through and actually try it: the
         // client gets video instead of an error and never notices the pause.
         if let Some(still) = rate_limit_remaining(&state, &host).await {
             push_debug_log(
@@ -1539,6 +1681,26 @@ async fn stream(
         }
     }
 
+    // Space out fresh media sends per host — a seek fires 3-4 concurrent
+    // opens in the same instant, which reads as abuse to the panel.
+    if vod_media || path_lower.ends_with(".ts") {
+        let wait = {
+            let mut last = state.last_send.lock().await;
+            let now = Instant::now();
+            let earliest = last
+                .get(&host)
+                .map(|prev| *prev + FRESH_SEND_SPACING)
+                .filter(|t| *t > now)
+                .unwrap_or(now)
+                .min(now + FRESH_SEND_TAIL_CAP);
+            last.insert(host.clone(), earliest);
+            earliest.saturating_duration_since(now)
+        };
+        if !wait.is_zero() {
+            tokio::time::sleep(wait).await;
+        }
+    }
+
     let started = Instant::now();
     let burst = note_request(&state, &host).await;
 
@@ -1546,10 +1708,25 @@ async fn stream(
         Err(_) => {
             // Connected but never answered. Dropping the future here closes the
             // socket, which is the whole point: hand the slot back instead of
-            // holding it hostage. A hang IS the panel throttling us, so arm
-            // the same cool-down a 429 would — each retry would otherwise hold
-            // a provider slot hostage for the full timeout.
-            let _ = note_rate_limited(&state, &host, None).await;
+            // holding it hostage. A hang IS the panel throttling us — and a
+            // flat 5s pause just produced another 12s hang in practice, so
+            // consecutive timeouts back off exponentially instead.
+            let streak = {
+                let mut streaks = state.timeout_streak.lock().await;
+                let n = streaks.entry(host.clone()).or_insert(0);
+                *n += 1;
+                *n
+            };
+            let cooldown = timeout_cooldown(streak);
+            state
+                .rate_limited
+                .lock()
+                .await
+                .insert(host.clone(), Instant::now() + cooldown);
+            log::warn!(
+                "[stream] timeout streak {streak} for host={host} — backing off {}s",
+                cooldown.as_secs()
+            );
             log::warn!(
                 "[stream] TIMEOUT host={host} file={file} — no response headers in {}s ({burst} reqs/{}s)",
                 UPSTREAM_HEADERS_TIMEOUT.as_secs(),
@@ -1570,7 +1747,11 @@ async fn stream(
                 "The provider accepted the connection but never responded. It is likely overloaded — try again shortly.".to_string(),
             );
         }
-        Ok(Ok(r)) => r,
+        Ok(Ok(r)) => {
+            // The provider answered — whatever the status, it is not hung.
+            state.timeout_streak.lock().await.remove(&host);
+            r
+        }
         Ok(Err(e)) => {
             log::warn!(
                 "[stream] FAIL host={host} file={file} after {}ms ({burst} reqs/{}s): {e}",
@@ -1714,8 +1895,47 @@ async fn stream(
             .get(header::CONTENT_RANGE)
             .and_then(|v| v.to_str().ok())
             .and_then(parse_content_range);
-        // Only park streams that run to end-of-file — bounded mid-file index
-        // reads finish in one gulp and leave nothing worth keeping.
+        // Bounded mid-file read: buffer it (they're small) and cache it —
+        // seeks re-issue these byte-identical, and serving the repeats from
+        // memory is what keeps later seeks down to ~one provider request.
+        if let Some((a, b, total)) =
+            range_info.filter(|(a, b, t)| b + 1 != *t && b >= a && (b - a) < BOUNDED_CACHE_ENTRY_MAX as u64)
+        {
+            return match upstream.bytes().await {
+                Ok(data) if data.len() as u64 == b - a + 1 => {
+                    {
+                        let mut slot = state.bounded_cache.lock().await;
+                        match slot.as_mut() {
+                            Some(c) if c.url == target.as_str() => c.insert((a, b), data.clone()),
+                            _ => {
+                                // New item (or first bounded read): start a
+                                // fresh cache for it.
+                                let mut c = BoundedCache::new(
+                                    target.as_str().to_string(),
+                                    total,
+                                    content_type.clone(),
+                                );
+                                c.insert((a, b), data.clone());
+                                *slot = Some(c);
+                            }
+                        }
+                    }
+                    match builder.body(Body::from(data)) {
+                        Ok(resp) => resp,
+                        Err(e) => cors_text(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+                    }
+                }
+                // Short read or upstream error: the copied Content-Length no
+                // longer matches, so a clean retryable error beats a
+                // truncated 206.
+                Ok(_) | Err(_) => cors_text(
+                    StatusCode::BAD_GATEWAY,
+                    "Provider closed the connection mid-response. Try again shortly.".to_string(),
+                ),
+            };
+        }
+
+        // Only park streams that run to end-of-file.
         if let Some((range_start, range_end, total)) = range_info.filter(|(_, e, t)| e + 1 == *t) {
             let _ = range_end;
             let body = spawn_pump(
@@ -2684,6 +2904,51 @@ mod tests {
         assert_eq!(flat(ring_slice(&ring, 100, 102, 105)), b"aabb");
         assert_eq!(flat(ring_slice(&ring, 100, 104, 104)), b"b");
         assert_eq!(flat(ring_slice(&ring, 100, 100, 100)), b"a");
+    }
+
+    #[test]
+    fn timeout_backoff_doubles_and_caps() {
+        assert_eq!(timeout_cooldown(1), Duration::from_secs(5));
+        assert_eq!(timeout_cooldown(2), Duration::from_secs(10));
+        assert_eq!(timeout_cooldown(3), Duration::from_secs(20));
+        assert_eq!(timeout_cooldown(4), Duration::from_secs(40));
+        // Capped: 5 * 16 = 80 -> 60, and it must stay there forever.
+        assert_eq!(timeout_cooldown(5), Duration::from_secs(60));
+        assert_eq!(timeout_cooldown(50), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn bounded_cache_stores_gets_and_rejects_oversize() {
+        let mut c = BoundedCache::new("u".into(), 1000, "video/mp4".into());
+        c.insert((0, 3), Bytes::from_static(b"abcd"));
+        assert_eq!(c.get((0, 3)), Some(Bytes::from_static(b"abcd")));
+        assert_eq!(c.get((0, 4)), None, "only exact range matches hit");
+
+        // Double insert of the same key must not double the accounting.
+        c.insert((0, 3), Bytes::from_static(b"abcd"));
+        assert_eq!(c.bytes, 4);
+
+        // An entry over the per-entry cap is refused outright.
+        let big = Bytes::from(vec![0u8; BOUNDED_CACHE_ENTRY_MAX + 1]);
+        c.insert((10, 10 + big.len() as u64 - 1), big);
+        assert_eq!(c.map.len(), 1);
+    }
+
+    #[test]
+    fn bounded_cache_evicts_least_recently_used() {
+        let mut c = BoundedCache::new("u".into(), u64::MAX, "video/mp4".into());
+        let chunk = |n: u8| Bytes::from(vec![n; BOUNDED_CACHE_ENTRY_MAX]);
+        let entries = (BOUNDED_CACHE_TOTAL_MAX / BOUNDED_CACHE_ENTRY_MAX) as u64; // fits exactly
+        for i in 0..entries {
+            c.insert((i, i), chunk(i as u8));
+        }
+        assert!(c.bytes <= BOUNDED_CACHE_TOTAL_MAX);
+        // Touch the oldest so it becomes most-recent, then overflow by one.
+        assert!(c.get((0, 0)).is_some());
+        c.insert((entries, entries), chunk(0));
+        assert!(c.bytes <= BOUNDED_CACHE_TOTAL_MAX);
+        assert!(c.get((0, 0)).is_some(), "recently-touched entry survives");
+        assert!(c.get((1, 1)).is_none(), "the actual LRU entry was evicted");
     }
 
     #[test]
