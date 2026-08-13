@@ -63,6 +63,17 @@ const RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(10);
 /// Never trust an absurd `Retry-After` from the provider — cap the stall.
 const RATE_LIMIT_COOLDOWN_MAX: Duration = Duration::from_secs(60);
 
+/// How long to wait for the provider to START answering (i.e. send response
+/// headers) before giving up.
+///
+/// The BODY stays deliberately unbounded — a stream legitimately runs for
+/// hours — but `send()` resolves as soon as headers arrive, so bounding it
+/// only catches "connected, then silence". That case is expensive: observed in
+/// the wild at 35s, during which the request holds one of the panel's very
+/// limited per-IP connection slots while transferring nothing, and the user
+/// stares at a spinner that already gave up.
+const UPSTREAM_HEADERS_TIMEOUT: Duration = Duration::from_secs(12);
+
 /// Debug-mode log ring buffer: newest-N requests, both the relay's own
 /// outbound provider fetches and everything the frontend reports about its
 /// own `fetch()` calls. Bounded so a long debug session can't grow unbounded.
@@ -1111,9 +1122,33 @@ async fn stream(
     let started = Instant::now();
     let burst = note_request(&state, &host).await;
 
-    let upstream = match req.send().await {
-        Ok(r) => r,
-        Err(e) => {
+    let upstream = match tokio::time::timeout(UPSTREAM_HEADERS_TIMEOUT, req.send()).await {
+        Err(_) => {
+            // Connected but never answered. Dropping the future here closes the
+            // socket, which is the whole point: hand the slot back instead of
+            // holding it hostage.
+            log::warn!(
+                "[stream] TIMEOUT host={host} file={file} — no response headers in {}s ({burst} reqs/{}s)",
+                UPSTREAM_HEADERS_TIMEOUT.as_secs(),
+                REQUEST_RATE_WINDOW.as_secs()
+            );
+            push_debug_log(
+                &state,
+                "relay",
+                "GET",
+                format!("{host}/{file}"),
+                Some(StatusCode::GATEWAY_TIMEOUT.as_u16()),
+                Some(started.elapsed().as_millis() as u64),
+                Some(format!("no response in {}s", UPSTREAM_HEADERS_TIMEOUT.as_secs())),
+            )
+            .await;
+            return cors_text(
+                StatusCode::GATEWAY_TIMEOUT,
+                "The provider accepted the connection but never responded. It is likely overloaded — try again shortly.".to_string(),
+            );
+        }
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => {
             log::warn!(
                 "[stream] FAIL host={host} file={file} after {}ms ({burst} reqs/{}s): {e}",
                 started.elapsed().as_millis(),
@@ -1197,9 +1232,30 @@ async fn stream(
     // per-IP connection/rate limit trips. Piping that into <video> yields an
     // opaque decode error; return a clear, retryable 502 instead.
     if (vod_media || path_lower.ends_with(".ts")) && content_type.contains("text/html") {
+        // Same signal as a 429, just dressed up as a 200: XUI panels serve a
+        // block page when the account is over its connection limit. Arm the
+        // same cool-down, or the media element's retries keep the limit
+        // pinned exactly as they did for the explicit 429 case.
+        let cooldown = note_rate_limited(&state, &host, None).await;
         log::warn!(
-            "[stream] provider sent HTML for media host={host} file={file} (likely connection/rate limit)"
+            "[stream] provider sent HTML for media host={host} file={file} (likely connection/rate limit) — pausing upstream requests for {}s",
+            cooldown.as_secs()
         );
+        // Overwrite the "200 OK" already recorded above, which reads as
+        // success in the debug window and hides the real cause.
+        push_debug_log(
+            &state,
+            "relay",
+            "GET",
+            format!("{host}/{file}"),
+            Some(StatusCode::BAD_GATEWAY.as_u16()),
+            Some(started.elapsed().as_millis() as u64),
+            Some(format!(
+                "provider sent an HTML block page, not video — pausing {}s",
+                cooldown.as_secs()
+            )),
+        )
+        .await;
         return cors_text(
             StatusCode::BAD_GATEWAY,
             "Provider returned an HTML page instead of video (likely a temporary connection limit). Try again shortly.".to_string(),
