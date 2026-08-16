@@ -8,7 +8,9 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   detectSubtitleFormat,
+  focusedCueIndex,
   formatOffset,
+  offsetForMatch,
   parseSubtitles,
   parseTimecode,
   shiftCues,
@@ -252,5 +254,72 @@ describe("formatOffset", () => {
     assert.equal(formatOffset(1.5), "+1.5s");
     assert.equal(formatOffset(-0.5), "-0.5s");
     assert.equal(formatOffset(0.0001), "0s");
+  });
+});
+
+describe("focusedCueIndex", () => {
+  const cues: SubtitleCue[] = [
+    { start: 10, end: 12, text: "a" },
+    { start: 20, end: 22, text: "b" },
+    { start: 30, end: 32, text: "c" },
+  ];
+
+  it("picks the last line that has already started", () => {
+    assert.equal(focusedCueIndex(cues, 0, 21), 1);
+    assert.equal(focusedCueIndex(cues, 0, 25), 1, "still that line during the gap after it");
+    assert.equal(focusedCueIndex(cues, 0, 30), 2, "exactly on a start counts as started");
+  });
+
+  it("focuses the first line while playback is still before all of them", () => {
+    assert.equal(focusedCueIndex(cues, 0, 0), 0);
+    assert.equal(focusedCueIndex(cues, 0, 9.9), 0);
+  });
+
+  it("accounts for the current offset", () => {
+    // +15s pushes cue "a" to 25s, so at 21s nothing has started yet.
+    assert.equal(focusedCueIndex(cues, 15, 21), 0);
+    assert.equal(focusedCueIndex(cues, 15, 26), 0);
+    assert.equal(focusedCueIndex(cues, 15, 36), 1);
+    // -5s pulls them earlier.
+    assert.equal(focusedCueIndex(cues, -5, 16), 1);
+  });
+
+  it("returns -1 only when there is nothing to focus", () => {
+    assert.equal(focusedCueIndex([], 0, 5), -1);
+  });
+
+  it("agrees with a linear scan across a large sorted list", () => {
+    // Guards the binary search, which is what makes this cheap on a
+    // thousands-of-cues file re-evaluated as the clock ticks.
+    const many: SubtitleCue[] = Array.from({ length: 2000 }, (_, i) => ({
+      start: i * 3,
+      end: i * 3 + 2,
+      text: `line ${i}`,
+    }));
+    const linear = (time: number) => {
+      let found = -1;
+      many.forEach((cue, index) => {
+        if (cue.start <= time) found = index;
+      });
+      return found === -1 ? 0 : found;
+    };
+    for (const time of [0, 1, 3, 4, 2999, 3000, 5997, 100000]) {
+      assert.equal(focusedCueIndex(many, 0, time), linear(time), `t=${time}`);
+    }
+  });
+});
+
+describe("offsetForMatch", () => {
+  it("derives the delay that lands a line on the current moment", () => {
+    // The line is written at 10s but the user hears it at 13s -> +3s.
+    assert.equal(offsetForMatch(10, 13), 3);
+    // Written at 10s, heard at 7s -> the file is late, pull it back.
+    assert.equal(offsetForMatch(10, 7), -3);
+    assert.equal(offsetForMatch(10, 10), 0);
+  });
+
+  it("rounds to a tenth so the displayed delay matches what was applied", () => {
+    assert.equal(offsetForMatch(10, 13.04), 3);
+    assert.equal(offsetForMatch(10, 13.06), 3.1);
   });
 });

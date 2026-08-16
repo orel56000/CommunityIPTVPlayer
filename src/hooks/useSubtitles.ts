@@ -21,6 +21,14 @@ export interface UseSubtitlesReturn {
   offsetSec: number;
   nudgeOffset: (deltaSec: number) => void;
   resetOffset: () => void;
+  /** Set the delay outright (match-a-line syncing computes one). */
+  setOffset: (sec: number) => void;
+  /**
+   * The selected track's cues at their ORIGINAL timings, for the sync panel.
+   * Unshifted on purpose: the panel derives a new offset from them, so
+   * feeding it already-shifted times would compound the existing delay.
+   */
+  selectedCues: SubtitleCue[];
   /** Parse + add a dropped/chosen file. Resolves to a message for the user. */
   addFile: (file: File) => Promise<string>;
   /** Transient status line under the list (added / failed / none found). */
@@ -130,6 +138,8 @@ export const useSubtitles = (
     externalsRef.current = next;
     setExternalsState(next);
   }, []);
+  /** Last mirror of the selected embedded track, for the sync panel. */
+  const [embeddedCues, setEmbeddedCues] = useState<SubtitleCue[]>([]);
   const [selectedId, setSelectedId] = useState<string>(OFF_ID);
   const [offsetSec, setOffsetSec] = useState(0);
   const [hint, setHint] = useState<string | null>(null);
@@ -154,6 +164,7 @@ export const useSubtitles = (
   useEffect(() => {
     setEmbedded([]);
     setExternals([]);
+    setEmbeddedCues([]);
     expectedCueCountRef.current = 0;
     setSelectedId(OFF_ID);
     setOffsetSec(0);
@@ -279,7 +290,9 @@ export const useSubtitles = (
       if (source) {
         const cues = readableCues(source);
         if (cues) {
-          expectedCueCountRef.current = fillCues(managed, shiftCues(copyCues(cues), offsetSec));
+          const copied = copyCues(cues);
+          setEmbeddedCues(copied);
+          expectedCueCountRef.current = fillCues(managed, shiftCues(copied, offsetSec));
           mirroredCountRef.current = cues.length;
         }
       }
@@ -337,7 +350,11 @@ export const useSubtitles = (
           managedCues.length === expectedCueCountRef.current &&
           managed.mode === "showing";
         if (intact) return;
-        desired = shiftCues(copyCues(cues), offsetSec);
+        const copied = copyCues(cues);
+        // Only publish when the cue list actually grew — this runs every 2s
+        // and a fresh array each tick would re-render the sync panel forever.
+        if (cues.length !== mirroredCountRef.current) setEmbeddedCues(copied);
+        desired = shiftCues(copied, offsetSec);
         mirroredCountRef.current = cues.length;
       }
       if (!desired) return;
@@ -410,6 +427,10 @@ export const useSubtitles = (
 
   const resetOffset = useCallback(() => setOffsetSec(0), []);
 
+  const setOffset = useCallback((sec: number) => {
+    setOffsetSec(Number.isFinite(sec) ? Math.round(sec * 10) / 10 : 0);
+  }, []);
+
   const options: SubtitleOption[] = [
     { id: OFF_ID, kind: "off", label: "Off" },
     ...embedded,
@@ -423,6 +444,10 @@ export const useSubtitles = (
     offsetSec,
     nudgeOffset,
     resetOffset,
+    setOffset,
+    selectedCues:
+      externals.find((entry) => entry.id === selectedId)?.cues ??
+      (selectedId.startsWith("embedded:") ? embeddedCues : []),
     addFile,
     hint,
     hasSubtitles: embedded.length > 0 || externals.length > 0,

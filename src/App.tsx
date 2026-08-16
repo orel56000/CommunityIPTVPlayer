@@ -46,13 +46,14 @@ import { ErrorState } from "./components/shared/ErrorState";
 import { InstallAppBanner } from "./components/shared/InstallAppBanner";
 import { BackendConnectionModal } from "./components/shared/BackendConnectionModal";
 import { DetailsPanel } from "./components/panels/DetailsPanel";
-import { now } from "./utils/time";
+import { formatDuration, now } from "./utils/time";
 import { playlistDb } from "./utils/indexedDb";
 import { loadPlaylistSource } from "./utils/loadPlaylistSource";
 import { loadXtreamSeriesEpisodes } from "./utils/xtream";
 import { backupToBackend } from "./utils/backendBackup";
 import { serializePlaylistItemsToM3u } from "./utils/exportM3u";
 import { resolveRecentDisplayItem, resolveRecentItemId } from "./utils/recentItems";
+import { buildLocalVideoItem, isLocalItem } from "./utils/localMedia";
 
 const initialFilters: UIFilters = {
   query: "",
@@ -81,6 +82,17 @@ const App = () => {
   const [connectionOpen, setConnectionOpen] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [connectionPlaybackError, setConnectionPlaybackError] = useState<string | null>(null);
+  /**
+   * Resolution/duration of a dropped file, read once its metadata loads. Held
+   * beside the item rather than merged into it on purpose: the playback effect
+   * depends on the item's identity, so enriching it would restart playback,
+   * which would load metadata again — a loop.
+   */
+  const [localMediaInfo, setLocalMediaInfo] = useState<{
+    width: number;
+    height: number;
+    durationSec: number | null;
+  } | null>(null);
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   const [updateDismissed, setUpdateDismissed] = useState(false);
   const [updateBusy, setUpdateBusy] = useState(false);
@@ -898,7 +910,12 @@ const App = () => {
 
   const goToBrowseFromDetails = useCallback(
     (item: PlaylistItem) => {
-      if (item.playlistId !== state.activePlaylistId) setActivePlaylistId(item.playlistId);
+      // Only switch to a playlist that actually exists — a dropped local file
+      // carries a synthetic id, and selecting it would empty the whole library
+      // (and persist that). Same guard as playRemoteItem.
+      if (item.playlistId !== state.activePlaylistId && state.playlists.some((p) => p.id === item.playlistId)) {
+        setActivePlaylistId(item.playlistId);
+      }
       if (item.kind === "series_episode") {
         const pl = state.playlists.find((p) => p.id === item.playlistId);
         if (!pl) return;
@@ -1038,8 +1055,54 @@ const App = () => {
     }
   };
 
+  /**
+   * Play a video file dropped on the player. It becomes a synthetic item in
+   * its own playlist so the normal pipeline (title, details, subtitles) works
+   * unchanged — while recents/progress/last-played skip it, because a blob URL
+   * is dead as soon as the app reloads and would restore into a broken item.
+   */
+  const localObjectUrlRef = useRef<string | null>(null);
+  const staleObjectUrlsRef = useRef<string[]>([]);
+  const handlePlayLocalFile = useCallback(
+    (file: File) => {
+      // Retire the previous blob rather than revoking it here — the <video> is
+      // still pointed at it until the player's effect swaps sources below.
+      if (localObjectUrlRef.current) staleObjectUrlsRef.current.push(localObjectUrlRef.current);
+      const objectUrl = URL.createObjectURL(file);
+      localObjectUrlRef.current = objectUrl;
+      setLocalMediaInfo(null);
+      setCurrentItem(buildLocalVideoItem(file, objectUrl));
+      // Drop the watch URL. It describes a library item that is no longer on
+      // screen, and leaving it up keeps the deep-link effect live: it would
+      // re-raise "not connected" over the file that just started, then swap the
+      // file out for the linked item the moment a backend appears.
+      if (deepLink) navigate("/", { replace: true });
+    },
+    [deepLink, navigate, setCurrentItem],
+  );
+
+  // Runs after VideoPlayer's own effect (child effects flush first), so by now
+  // the element has let go of the old source and the blob is safe to release.
+  useEffect(() => {
+    for (const url of staleObjectUrlsRef.current) URL.revokeObjectURL(url);
+    staleObjectUrlsRef.current = [];
+    if (isLocalItem(playerState.currentItem)) return;
+    if (!localObjectUrlRef.current) return;
+    URL.revokeObjectURL(localObjectUrlRef.current);
+    localObjectUrlRef.current = null;
+  }, [playerState.currentItem]);
+  useEffect(
+    () => () => {
+      for (const url of staleObjectUrlsRef.current) URL.revokeObjectURL(url);
+      if (localObjectUrlRef.current) URL.revokeObjectURL(localObjectUrlRef.current);
+    },
+    [],
+  );
+
   const onPlayerProgress = (positionSec: number, durationSec: number) => {
     if (!playerState.currentItem) return;
+    // A dropped file has no library entry to resume into.
+    if (isLocalItem(playerState.currentItem)) return;
     const id = playerState.currentItem.id;
     const lastSaved = lastProgressRef.current[id] ?? 0;
     if (Math.abs(positionSec - lastSaved) < 5 && positionSec < durationSec - 1) return;
@@ -1150,12 +1213,22 @@ const App = () => {
       onAddPlaylist={() => setImportOpen(true)}
     />
   );
+  // Facts only the loaded file can tell us, folded into the details panel.
+  const localFileMetadata = useMemo(() => {
+    if (!localMediaInfo || !isLocalItem(playerState.currentItem)) return undefined;
+    return {
+      resolution: `${localMediaInfo.width}x${localMediaInfo.height}`,
+      ...(localMediaInfo.durationSec ? { length: formatDuration(localMediaInfo.durationSec) } : {}),
+    };
+  }, [localMediaInfo, playerState.currentItem]);
+
   const detailsPanel = (
     <DetailsPanel
       item={playerState.currentItem}
+      extraMetadata={localFileMetadata}
       resumeAt={currentResume}
       episodePageUrl={episodePageUrl}
-      onGoToBrowse={goToBrowseFromDetails}
+      onGoToBrowse={isLocalItem(playerState.currentItem) ? undefined : goToBrowseFromDetails}
     />
   );
 
@@ -1205,7 +1278,12 @@ const App = () => {
               onProgress={onPlayerProgress}
               onEnded={onPlayerEnded}
               resumeFrom={currentResume}
-              playbackBlocked={!canPlayVideos}
+              onPlayLocalFile={handlePlayLocalFile}
+              onMediaInfo={(info) => {
+                if (isLocalItem(playerState.currentItem)) setLocalMediaInfo(info);
+              }}
+              // A local file streams from a blob URL — it needs no backend.
+              playbackBlocked={!canPlayVideos && !isLocalItem(playerState.currentItem)}
               onPlaybackBlockedAction={showBackendRequired}
               nextEpisode={currentNextEpisode}
               onPlayNextEpisode={() => currentNextEpisode && handlePlay(currentNextEpisode)}

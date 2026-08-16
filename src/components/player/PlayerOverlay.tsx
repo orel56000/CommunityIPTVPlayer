@@ -84,6 +84,8 @@ export interface PlayerOverlayProps {
   onResetSubtitleOffset?: () => void;
   /** Opens the file picker for adding an external subtitle file. */
   onAddSubtitleFile?: () => void;
+  /** Opens the match-a-line sync panel (only useful with a track selected). */
+  onOpenSubtitleSync?: () => void;
   subtitleHint?: string | null;
   /** A next episode is queued (series only) — shows the in-player skip button. */
   canPlayNext?: boolean;
@@ -155,6 +157,7 @@ export const PlayerOverlay = ({
   onNudgeSubtitleOffset,
   onResetSubtitleOffset,
   onAddSubtitleFile,
+  onOpenSubtitleSync,
   subtitleHint = null,
   canPlayNext = false,
   nextEpisodeLabel = null,
@@ -619,6 +622,21 @@ export const PlayerOverlay = ({
                           <span className="text-slate-300">Delay</span>
                           <span className="tabular-nums text-cyan-300">{formatOffset(subtitleOffsetSec)}</span>
                         </div>
+                        {onOpenSubtitleSync ? (
+                          <button
+                            type="button"
+                            className="mb-2 w-full rounded bg-cyan-500/15 px-2 py-1.5 text-[11px] text-cyan-200 transition hover:bg-cyan-500/25"
+                            onClick={() => {
+                              // The panel takes over this corner of the player —
+                              // leaving the popover up would sit on top of it.
+                              setSubsOpen(false);
+                              onOpenSubtitleSync();
+                            }}
+                            title="Pick the line you can hear and let the player work out the delay"
+                          >
+                            Match a line to the video…
+                          </button>
+                        ) : null}
                         <div className="flex items-center gap-1">
                           {[-1, -0.5, 0.5, 1].map((step) => (
                             <button

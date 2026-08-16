@@ -222,6 +222,46 @@ export const shiftCues = (cues: readonly SubtitleCue[], offsetSec: number): Subt
   return out;
 };
 
+/**
+ * Index of the cue that SHOULD be on screen at `timeSec` under the current
+ * offset — the last one that has already started. Falls back to the first cue
+ * when playback is still before all of them, so the sync list always has
+ * somewhere sensible to focus.
+ *
+ * Binary search: subtitle files routinely run to thousands of cues and this is
+ * re-evaluated as the clock ticks.
+ */
+export const focusedCueIndex = (
+  cues: readonly SubtitleCue[],
+  offsetSec: number,
+  timeSec: number,
+): number => {
+  if (cues.length === 0) return -1;
+  let low = 0;
+  let high = cues.length - 1;
+  let found = -1;
+  while (low <= high) {
+    const mid = (low + high) >> 1;
+    if (cues[mid].start + offsetSec <= timeSec) {
+      found = mid;
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+  return found === -1 ? 0 : found;
+};
+
+/**
+ * The offset that makes `cueStartSec` land exactly on `timeSec`.
+ *
+ * This is the whole point of match-a-line syncing: instead of guessing "+3s"
+ * and checking, the user says "THIS line is what I'm hearing right now" and
+ * the delay is derived from it.
+ */
+export const offsetForMatch = (cueStartSec: number, timeSec: number): number =>
+  Math.round((timeSec - cueStartSec) * 10) / 10;
+
 /** "+1.5s" / "-0.5s" / "0s" — the offset as shown next to the controls. */
 export const formatOffset = (offsetSec: number): string => {
   if (Math.abs(offsetSec) < 0.001) return "0s";

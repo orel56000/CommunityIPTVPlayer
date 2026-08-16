@@ -6,12 +6,20 @@ import { getShareId } from "../../utils/shareId";
 
 interface DetailsPanelProps {
   item: PlaylistItem | null;
+  /** Facts discovered at playback time (resolution of a dropped file, say). */
+  extraMetadata?: Record<string, string>;
   resumeAt: number;
   episodePageUrl?: string | null;
   onGoToBrowse?: (item: PlaylistItem) => void;
 }
 
-export const DetailsPanel = ({ item, resumeAt, episodePageUrl = null, onGoToBrowse }: DetailsPanelProps) => {
+export const DetailsPanel = ({
+  item,
+  extraMetadata,
+  resumeAt,
+  episodePageUrl = null,
+  onGoToBrowse,
+}: DetailsPanelProps) => {
   const [copied, setCopied] = useState(false);
   const [copiedLink, setCopiedLink] = useState(false);
   const [streamUrlVisible, setStreamUrlVisible] = useState(false);
@@ -29,10 +37,10 @@ export const DetailsPanel = ({ item, resumeAt, episodePageUrl = null, onGoToBrow
       "year",
       "category_id",
     ]);
-    return Object.entries(item.metadata ?? {})
+    return Object.entries({ ...item.metadata, ...extraMetadata })
       .filter(([key, value]) => !hiddenKeys.has(key) && value.trim().length > 0 && value.length < 180)
       .slice(0, 8);
-  }, [item]);
+  }, [item, extraMetadata]);
 
   useEffect(() => {
     setStreamUrlVisible(false);

@@ -8,6 +8,8 @@ import type { VideoFitMode } from "../../types/player";
 import { useChromecast } from "../../hooks/useChromecast";
 import { useCreditsDetection } from "../../hooks/useCreditsDetection";
 import { useSubtitles } from "../../hooks/useSubtitles";
+import { offsetForMatch } from "../../utils/subtitles";
+import { guessVideoMime, isSubtitleFile, isVideoFile } from "../../utils/localMedia";
 import { DEFAULT_CREDITS_CONFIG } from "../../utils/creditsDetection";
 import {
   creditsContentId,
@@ -26,6 +28,7 @@ import { CreditsDebugPanel } from "./CreditsDebugPanel";
 import { CreditsOverlay } from "./CreditsOverlay";
 import { PlayerNavBar } from "./PlayerNavBar";
 import { PlayerOverlay } from "./PlayerOverlay";
+import { SubtitleSyncPanel } from "./SubtitleSyncPanel";
 
 interface VideoPlayerProps {
   item: PlaylistItem | null;
@@ -45,6 +48,10 @@ interface VideoPlayerProps {
   /** Next episode in the series (null for non-series or the last episode). */
   nextEpisode?: EpisodeItem | null;
   onPlayNextEpisode?: () => void;
+  /** Play a video file the user dropped on the player, outside any playlist. */
+  onPlayLocalFile?: (file: File) => void;
+  /** Intrinsic size and length of the loaded media, once known. */
+  onMediaInfo?: (info: { width: number; height: number; durationSec: number | null }) => void;
   /** Suggest the next episode once the end credits are detected. */
   creditsDetection?: boolean;
   /** With the suggestion up, auto-advance after a cancellable countdown. */
@@ -363,6 +370,8 @@ export const VideoPlayer = ({
   onPlaybackBlockedAction,
   nextEpisode = null,
   onPlayNextEpisode,
+  onPlayLocalFile,
+  onMediaInfo,
   creditsDetection = true,
   creditsAutoNext = false,
   videoFitMode = "contain",
@@ -389,6 +398,7 @@ export const VideoPlayer = ({
   const onEndedRef = useRef(onEnded);
   const onErrorRef = useRef(onError);
   const onPlayingStateRef = useRef(onPlayingState);
+  const onMediaInfoRef = useRef(onMediaInfo);
   const resumeFromRef = useRef(resumeFrom);
 
   const [loading, setLoading] = useState(false);
@@ -448,6 +458,9 @@ export const VideoPlayer = ({
   useEffect(() => {
     onPlayingStateRef.current = onPlayingState;
   }, [onPlayingState]);
+  useEffect(() => {
+    onMediaInfoRef.current = onMediaInfo;
+  }, [onMediaInfo]);
   useEffect(() => {
     resumeFromRef.current = resumeFrom;
   }, [resumeFrom]);
@@ -612,7 +625,14 @@ export const VideoPlayer = ({
   const subtitleInputRef = useRef<HTMLInputElement | null>(null);
   const [subtitleDropActive, setSubtitleDropActive] = useState(false);
 
+  const [subtitleSyncOpen, setSubtitleSyncOpen] = useState(false);
+
   const openSubtitlePicker = useCallback(() => subtitleInputRef.current?.click(), []);
+
+  // A sync panel for a track that is no longer selected would be stranded.
+  useEffect(() => {
+    if (subtitles.selectedId === "off") setSubtitleSyncOpen(false);
+  }, [subtitles.selectedId]);
 
   const handleSubtitleFiles = useCallback(
     (files: FileList | null) => {
@@ -620,6 +640,44 @@ export const VideoPlayer = ({
       if (file) void subtitles.addFile(file);
     },
     [subtitles],
+  );
+
+  const [dropNotice, setDropNotice] = useState<string | null>(null);
+  useEffect(() => {
+    if (!dropNotice) return;
+    const timer = window.setTimeout(() => setDropNotice(null), 5000);
+    return () => window.clearTimeout(timer);
+  }, [dropNotice]);
+
+  /** A drop can be a subtitle to load or a video to play — decide per file. */
+  const handleDroppedFiles = useCallback(
+    (files: FileList | null) => {
+      const list = Array.from(files ?? []);
+      if (list.length === 0) return;
+
+      // Subtitles first: dropping a video AND its .srt together should play
+      // the video with the subtitle already loaded, not race over the item.
+      const subtitle = list.find((file) => isSubtitleFile(file));
+      if (subtitle) void subtitles.addFile(subtitle);
+
+      const video = list.find((file) => isVideoFile(file));
+      if (video && onPlayLocalFile) {
+        // Warn rather than block: the container may still be playable even
+        // when canPlayType is unsure, and a wrong guess should not stop the
+        // user watching their own file.
+        const mime = guessVideoMime(video);
+        const probe = document.createElement("video");
+        if (mime && probe.canPlayType(mime) === "") {
+          setDropNotice(`${video.name} may not play — this browser has no ${mime} support.`);
+        }
+        onPlayLocalFile(video);
+        return;
+      }
+      if (!subtitle) {
+        setDropNotice(`${list[0].name} is not a video or subtitle file.`);
+      }
+    },
+    [onPlayLocalFile, subtitles],
   );
 
   // Only claim a drag that actually carries a file, so dragging anything else
@@ -646,9 +704,9 @@ export const VideoPlayer = ({
       if (!dragHasFile(event)) return;
       event.preventDefault();
       setSubtitleDropActive(false);
-      handleSubtitleFiles(event.dataTransfer?.files ?? null);
+      handleDroppedFiles(event.dataTransfer?.files ?? null);
     },
-    [handleSubtitleFiles],
+    [handleDroppedFiles],
   );
 
   const {
@@ -863,6 +921,15 @@ export const VideoPlayer = ({
     const onLoadedMetadata = () => {
       const resumePoint = resumeFromRef.current;
       setDuration(Number.isFinite(video.duration) ? video.duration : 0);
+      // 0x0 is an audio-only stream — report nothing rather than a fake size.
+      if (video.videoWidth > 0) {
+        onMediaInfoRef.current?.({
+          width: video.videoWidth,
+          height: video.videoHeight,
+          // Infinity for a live stream, NaN before it is known.
+          durationSec: Number.isFinite(video.duration) ? video.duration : null,
+        });
+      }
       if (hasAppliedResumeRef.current) return;
       if (resumePoint > 3 && Number.isFinite(video.duration) && resumePoint < video.duration) {
         video.currentTime = resumePoint;
@@ -1828,6 +1895,30 @@ export const VideoPlayer = ({
             onClick={togglePlay}
             onDoubleClick={() => void toggleFullscreen()}
           />
+          {subtitleSyncOpen ? (
+            <SubtitleSyncPanel
+              cues={subtitles.selectedCues}
+              offsetSec={subtitles.offsetSec}
+              // Halved resolution: the panel re-renders its whole cue list on
+              // every change, and 2 Hz is plenty for a highlight and a clock.
+              currentTime={Math.round(displayTime * 2) / 2}
+              onPick={(cueStartSec) => {
+                // Match against the live position, not the coarsened prop —
+                // this is the one number the whole feature turns on.
+                const at = videoRef.current?.currentTime;
+                subtitles.setOffset(
+                  offsetForMatch(cueStartSec, Number.isFinite(at) ? (at as number) : displayTime),
+                );
+                setSubtitleSyncOpen(false);
+              }}
+              onClose={() => setSubtitleSyncOpen(false)}
+            />
+          ) : null}
+          {dropNotice ? (
+            <div className="pointer-events-none absolute bottom-28 left-1/2 z-30 -translate-x-1/2 rounded-lg bg-amber-500/15 px-3 py-1.5 text-xs text-amber-100 shadow-lg ring-1 ring-amber-400/30">
+              {dropNotice}
+            </div>
+          ) : null}
           {subtitles.hint ? (
             <div className="pointer-events-none absolute bottom-20 left-1/2 z-30 -translate-x-1/2 rounded-lg bg-slate-950/90 px-3 py-1.5 text-xs text-cyan-100 shadow-lg">
               {subtitles.hint}
@@ -1835,7 +1926,11 @@ export const VideoPlayer = ({
           ) : null}
           {subtitleDropActive ? (
             <div className="pointer-events-none absolute inset-3 z-30 flex items-center justify-center rounded-xl border-2 border-dashed border-cyan-400/70 bg-slate-950/70">
-              <p className="text-sm font-medium text-cyan-100">Drop a subtitle file (.srt, .vtt, .ass)</p>
+              <p className="text-sm font-medium text-cyan-100">
+                {onPlayLocalFile
+                  ? "Drop a video to play it, or a subtitle file (.srt, .vtt, .ass)"
+                  : "Drop a subtitle file (.srt, .vtt, .ass)"}
+              </p>
             </div>
           ) : null}
           <input
@@ -1895,6 +1990,9 @@ export const VideoPlayer = ({
             onNudgeSubtitleOffset={subtitles.nudgeOffset}
             onResetSubtitleOffset={subtitles.resetOffset}
             onAddSubtitleFile={openSubtitlePicker}
+            onOpenSubtitleSync={
+              subtitles.selectedId === "off" ? undefined : () => setSubtitleSyncOpen(true)
+            }
             subtitleHint={subtitles.hint}
             canPlayNext={Boolean(nextEpisode)}
             nextEpisodeLabel={
