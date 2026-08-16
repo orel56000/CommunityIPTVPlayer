@@ -17,6 +17,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { MANAGED_TRACK_LANGUAGE } from "../utils/subtitles";
 import type {
   CreditsDetectionConfig,
   CreditsDetectionResult,
@@ -97,6 +98,10 @@ const readDialogueStarts = (video: HTMLVideoElement, previous: DialogueTrackStat
   for (let index = 0; index < tracks.length; index += 1) {
     const track = tracks[index];
     if (track.kind !== "subtitles" && track.kind !== "captions") continue;
+    // The player's own render track mirrors whichever track/file the user
+    // picked. Counting it too would double every cue of the embedded track it
+    // was copied from, and shift dialogue timings by the user's chosen offset.
+    if (track.language === MANAGED_TRACK_LANGUAGE) continue;
     // Cues are only populated for a non-disabled track. "hidden" loads them
     // without rendering anything, so this stays invisible to the user.
     if (track.mode === "disabled") {

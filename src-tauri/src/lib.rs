@@ -121,6 +121,12 @@ fn build_window(app: &tauri::AppHandle) -> tauri::Result<()> {
     .inner_size(1280.0, 800.0)
     .min_inner_size(800.0, 600.0)
     .resizable(true)
+    // Hand file drops to the web layer instead of Tauri's native handler.
+    // Tauri enables that handler by default, and it CONSUMES the drop before
+    // WebKit ever fires dragover/drop — so the player's "drop a subtitle file
+    // here" would silently do nothing in the packaged app while working fine
+    // in a browser. Nothing here uses Tauri's own drag-drop events.
+    .disable_drag_drop_handler()
     // Keep WebView2 audio IN the window's renderer process. By default Chromium
     // renders audio in a separate "audio service" process, so when a user shares
     // THIS window (Discord/Teams/etc.) the per-window audio capture misses the

@@ -11,6 +11,8 @@ import {
   Play,
   RotateCcw,
   RotateCw,
+  Captions,
+  Plus,
   Settings,
   SkipForward,
   Volume1,
@@ -20,6 +22,8 @@ import {
 } from "lucide-react";
 import clsx from "clsx";
 import type { VideoFitMode } from "../../types/player";
+import { formatOffset } from "../../utils/subtitles";
+import type { SubtitleOption } from "../../hooks/useSubtitles";
 import { formatDuration } from "../../utils/time";
 import { CastDevicePicker } from "./CastDevicePicker";
 import type { RelayCastDevice } from "../../hooks/useChromecast";
@@ -70,6 +74,17 @@ export interface PlayerOverlayProps {
   /** How the video maps onto its box (contain/cover/fill/none). */
   videoFitMode?: VideoFitMode;
   onVideoFitModeChange?: (mode: VideoFitMode) => void;
+  /** Subtitle tracks (embedded + added files), "Off" first. */
+  subtitleOptions?: SubtitleOption[];
+  subtitleSelectedId?: string;
+  onSelectSubtitle?: (id: string) => void;
+  /** Seconds the subtitles are shifted by; positive shows them later. */
+  subtitleOffsetSec?: number;
+  onNudgeSubtitleOffset?: (deltaSec: number) => void;
+  onResetSubtitleOffset?: () => void;
+  /** Opens the file picker for adding an external subtitle file. */
+  onAddSubtitleFile?: () => void;
+  subtitleHint?: string | null;
   /** A next episode is queued (series only) — shows the in-player skip button. */
   canPlayNext?: boolean;
   nextEpisodeLabel?: string | null;
@@ -133,6 +148,14 @@ export const PlayerOverlay = ({
   onVideoScale,
   videoFitMode = "contain",
   onVideoFitModeChange,
+  subtitleOptions,
+  subtitleSelectedId = "off",
+  onSelectSubtitle,
+  subtitleOffsetSec = 0,
+  onNudgeSubtitleOffset,
+  onResetSubtitleOffset,
+  onAddSubtitleFile,
+  subtitleHint = null,
   canPlayNext = false,
   nextEpisodeLabel = null,
   onPlayNext,
@@ -146,6 +169,7 @@ export const PlayerOverlay = ({
 }: PlayerOverlayProps) => {
   const [ratesOpen, setRatesOpen] = useState(false);
   const [zoomOpen, setZoomOpen] = useState(false);
+  const [subsOpen, setSubsOpen] = useState(false);
   const scrubberRef = useRef<HTMLDivElement | null>(null);
   // A ref, not state: it is never rendered, and the pointerdown -> pointerup
   // of a fast click can land in the same React batch, so a state flag would
@@ -177,7 +201,18 @@ export const PlayerOverlay = ({
     return () => window.removeEventListener("click", close);
   }, [zoomOpen]);
 
+  useEffect(() => {
+    if (!subsOpen) return;
+    const close = () => setSubsOpen(false);
+    window.addEventListener("click", close);
+    return () => window.removeEventListener("click", close);
+  }, [subsOpen]);
+
   const zoomPercent = Math.round(videoScale * 100);
+  const subtitleActive = subtitleSelectedId !== "off";
+  const hasEmbeddedSubtitles = (subtitleOptions ?? []).some((option) => option.kind === "embedded");
+  const subtitleActiveLabel =
+    (subtitleOptions ?? []).find((option) => option.id === subtitleSelectedId)?.label ?? "Off";
 
   const timeFromClientX = (clientX: number): number | null => {
     const el = scrubberRef.current;
@@ -246,6 +281,38 @@ export const PlayerOverlay = ({
 
   const handleScrubLeave = () => {
     setHoverPreview(null);
+  };
+
+  // Keyboard seek (TV remotes / tab focus) staged like the drag above: each
+  // keydown (incl. auto-repeat while the key is held) only moves the staged
+  // position, and the ONE real seek is committed on keyup. Seeking per repeat
+  // would recreate exactly the byte-range burst the drag redesign eliminated.
+  const handleScrubKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (isLive || duration <= 0 || scrubbingRef.current) return;
+    let target: number | null = null;
+    if (event.key === "ArrowLeft") target = Math.max(0, displayTime - 10);
+    else if (event.key === "ArrowRight") target = Math.min(duration, displayTime + 10);
+    if (target == null) return;
+    event.preventDefault();
+    event.stopPropagation();
+    setPendingSeek(target);
+  };
+
+  const handleScrubKeyUp = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    if (scrubbingRef.current || pendingSeek == null) return;
+    event.preventDefault();
+    event.stopPropagation();
+    setPendingSeek(null);
+    onSeekTo(pendingSeek);
+  };
+
+  // Flaky TV browsers can drop the keyup; don't leave the bar stuck at a
+  // position the video never went to.
+  const handleScrubBlur = () => {
+    if (scrubbingRef.current || pendingSeek == null) return;
+    setPendingSeek(null);
+    onSeekTo(pendingSeek);
   };
 
   const volumeIcon = useMemo(() => {
@@ -349,12 +416,17 @@ export const PlayerOverlay = ({
             onPointerUp={handleScrubPointerUp}
             onPointerCancel={handleScrubPointerCancel}
             onPointerLeave={handleScrubLeave}
+            onKeyDown={handleScrubKeyDown}
+            onKeyUp={handleScrubKeyUp}
+            onBlur={handleScrubBlur}
             role="slider"
             aria-label="Seek"
             aria-valuemin={0}
             aria-valuemax={Math.floor(duration) || 0}
             aria-valuenow={Math.floor(displayTime) || 0}
-            tabIndex={-1}
+            // Not focusable while live/unseekable — a D-pad (tvNavigation)
+            // would otherwise land on a slider that ignores every arrow.
+            tabIndex={isLive || duration <= 0 ? -1 : 0}
           >
             <div className="absolute inset-y-0 left-0 rounded-full bg-slate-500/50" style={{ width: `${bufferedPct}%` }} />
             <div className="absolute inset-y-0 left-0 rounded-full bg-cyan-400" style={{ width: `${progressPct}%` }} />
@@ -475,6 +547,115 @@ export const PlayerOverlay = ({
           </div>
 
           <div className="ml-auto flex items-center gap-1">
+            {onSelectSubtitle ? (
+              <div className="relative">
+                <button
+                  type="button"
+                  className="control-btn"
+                  aria-label="Subtitles"
+                  aria-expanded={subsOpen}
+                  title={
+                    subtitleActive
+                      ? `Subtitles: ${subtitleActiveLabel}`
+                      : "Subtitles — pick a track, or add a file"
+                  }
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setRatesOpen(false);
+                    setZoomOpen(false);
+                    setSubsOpen((v) => !v);
+                  }}
+                >
+                  <Captions size={18} className={subtitleActive ? "text-cyan-300" : undefined} />
+                </button>
+                {subsOpen ? (
+                  <div
+                    className="absolute bottom-full right-0 mb-2 w-64 rounded-md border border-slate-700 bg-slate-950/95 p-3 shadow-xl"
+                    onClick={(event) => event.stopPropagation()}
+                  >
+                    <div className="mb-2 text-xs text-slate-300">Subtitles</div>
+                    <div className="max-h-52 space-y-1 overflow-y-auto">
+                      {(subtitleOptions ?? []).map((option) => (
+                        <button
+                          key={option.id}
+                          type="button"
+                          className={clsx(
+                            "flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[11px] transition",
+                            option.id === subtitleSelectedId
+                              ? "bg-cyan-500/80 text-white"
+                              : "bg-slate-800 text-slate-200 hover:bg-slate-700",
+                          )}
+                          onClick={() => onSelectSubtitle(option.id)}
+                        >
+                          <span className="min-w-0 flex-1 truncate">{option.label}</span>
+                          {option.kind === "embedded" ? (
+                            <span className="shrink-0 text-[10px] opacity-70">in video</span>
+                          ) : null}
+                        </button>
+                      ))}
+                    </div>
+                    {!hasEmbeddedSubtitles ? (
+                      <p className="mt-2 text-[10px] leading-snug text-slate-500">
+                        This video has no subtitles of its own.
+                      </p>
+                    ) : null}
+                    {onAddSubtitleFile ? (
+                      <button
+                        type="button"
+                        className="mt-2 flex w-full items-center justify-center gap-1 rounded border border-dashed border-slate-600 px-2 py-1.5 text-[11px] text-slate-300 transition hover:border-slate-400 hover:text-slate-100"
+                        onClick={onAddSubtitleFile}
+                      >
+                        <Plus size={12} />
+                        Add subtitle file
+                      </button>
+                    ) : null}
+                    <p className="mt-1.5 text-[10px] leading-snug text-slate-500">
+                      .srt, .vtt or .ass — you can also drop one onto the player.
+                    </p>
+                    {subtitleActive && onNudgeSubtitleOffset ? (
+                      <>
+                        <div className="my-2 border-t border-slate-800" />
+                        <div className="mb-1.5 flex items-center justify-between text-[11px]">
+                          <span className="text-slate-300">Delay</span>
+                          <span className="tabular-nums text-cyan-300">{formatOffset(subtitleOffsetSec)}</span>
+                        </div>
+                        <div className="flex items-center gap-1">
+                          {[-1, -0.5, 0.5, 1].map((step) => (
+                            <button
+                              key={step}
+                              type="button"
+                              className="flex-1 rounded bg-slate-800 px-1 py-1 text-[11px] tabular-nums text-slate-200 transition hover:bg-slate-700"
+                              onClick={() => onNudgeSubtitleOffset(step)}
+                              title={
+                                step < 0 ? "Show subtitles earlier" : "Show subtitles later"
+                              }
+                            >
+                              {step > 0 ? `+${step}` : step}
+                            </button>
+                          ))}
+                          {onResetSubtitleOffset ? (
+                            <button
+                              type="button"
+                              className="rounded bg-slate-800 px-2 py-1 text-[11px] text-slate-200 transition hover:bg-slate-700"
+                              onClick={onResetSubtitleOffset}
+                              title="Reset the delay to 0"
+                            >
+                              Reset
+                            </button>
+                          ) : null}
+                        </div>
+                        <p className="mt-1.5 text-[10px] leading-snug text-slate-500">
+                          Negative shows lines earlier, positive later.
+                        </p>
+                      </>
+                    ) : null}
+                    {subtitleHint ? (
+                      <p className="mt-2 text-[10px] leading-snug text-cyan-300/90">{subtitleHint}</p>
+                    ) : null}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
             <div className="relative">
               <button
                 type="button"

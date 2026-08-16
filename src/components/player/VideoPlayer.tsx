@@ -7,6 +7,7 @@ import type { EpisodeItem, PlaylistItem } from "../../types/models";
 import type { VideoFitMode } from "../../types/player";
 import { useChromecast } from "../../hooks/useChromecast";
 import { useCreditsDetection } from "../../hooks/useCreditsDetection";
+import { useSubtitles } from "../../hooks/useSubtitles";
 import { DEFAULT_CREDITS_CONFIG } from "../../utils/creditsDetection";
 import {
   creditsContentId,
@@ -606,6 +607,49 @@ export const VideoPlayer = ({
     markers: creditsMarkers,
     config: creditsConfig,
   });
+
+  const subtitles = useSubtitles(videoRef, item?.id ?? null);
+  const subtitleInputRef = useRef<HTMLInputElement | null>(null);
+  const [subtitleDropActive, setSubtitleDropActive] = useState(false);
+
+  const openSubtitlePicker = useCallback(() => subtitleInputRef.current?.click(), []);
+
+  const handleSubtitleFiles = useCallback(
+    (files: FileList | null) => {
+      const file = files?.[0];
+      if (file) void subtitles.addFile(file);
+    },
+    [subtitles],
+  );
+
+  // Only claim a drag that actually carries a file, so dragging anything else
+  // over the player (text selections, links) still behaves normally.
+  const dragHasFile = (event: React.DragEvent): boolean =>
+    Array.from(event.dataTransfer?.types ?? []).includes("Files");
+
+  const handleDragOver = useCallback((event: React.DragEvent<HTMLDivElement>) => {
+    if (!dragHasFile(event)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    setSubtitleDropActive(true);
+  }, []);
+
+  const handleDragLeave = useCallback((event: React.DragEvent<HTMLDivElement>) => {
+    // Fires for every child crossed during the drag; ignore all but the exit
+    // from the player itself, or the hint flickers.
+    if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+    setSubtitleDropActive(false);
+  }, []);
+
+  const handleDrop = useCallback(
+    (event: React.DragEvent<HTMLDivElement>) => {
+      if (!dragHasFile(event)) return;
+      event.preventDefault();
+      setSubtitleDropActive(false);
+      handleSubtitleFiles(event.dataTransfer?.files ?? null);
+    },
+    [handleSubtitleFiles],
+  );
 
   const {
     creditsDetected,
@@ -1753,6 +1797,9 @@ export const VideoPlayer = ({
           // Show on focus AND reschedule the hide, so a control keeping focus
           // (after a click, or tabbing) doesn't leave the bar stuck visible.
           onFocus={bumpControls}
+          onDragOver={handleDragOver}
+          onDragLeave={handleDragLeave}
+          onDrop={handleDrop}
           tabIndex={0}
         >
           <video
@@ -1780,6 +1827,27 @@ export const VideoPlayer = ({
             playsInline
             onClick={togglePlay}
             onDoubleClick={() => void toggleFullscreen()}
+          />
+          {subtitles.hint ? (
+            <div className="pointer-events-none absolute bottom-20 left-1/2 z-30 -translate-x-1/2 rounded-lg bg-slate-950/90 px-3 py-1.5 text-xs text-cyan-100 shadow-lg">
+              {subtitles.hint}
+            </div>
+          ) : null}
+          {subtitleDropActive ? (
+            <div className="pointer-events-none absolute inset-3 z-30 flex items-center justify-center rounded-xl border-2 border-dashed border-cyan-400/70 bg-slate-950/70">
+              <p className="text-sm font-medium text-cyan-100">Drop a subtitle file (.srt, .vtt, .ass)</p>
+            </div>
+          ) : null}
+          <input
+            ref={subtitleInputRef}
+            type="file"
+            accept=".srt,.vtt,.ass,.ssa,text/vtt,text/plain"
+            className="hidden"
+            onChange={(event) => {
+              handleSubtitleFiles(event.target.files);
+              // Clear so picking the SAME file again still fires onChange.
+              event.target.value = "";
+            }}
           />
           <PlayerOverlay
             title={title}
@@ -1820,6 +1888,14 @@ export const VideoPlayer = ({
             onVideoScale={setVideoZoom}
             videoFitMode={videoFitMode}
             onVideoFitModeChange={onVideoFitModeChange}
+            subtitleOptions={subtitles.options}
+            subtitleSelectedId={subtitles.selectedId}
+            onSelectSubtitle={subtitles.select}
+            subtitleOffsetSec={subtitles.offsetSec}
+            onNudgeSubtitleOffset={subtitles.nudgeOffset}
+            onResetSubtitleOffset={subtitles.resetOffset}
+            onAddSubtitleFile={openSubtitlePicker}
+            subtitleHint={subtitles.hint}
             canPlayNext={Boolean(nextEpisode)}
             nextEpisodeLabel={
               nextEpisode ? `S${nextEpisode.season ?? 0}E${nextEpisode.episode ?? 0} · ${nextEpisode.title}` : null
