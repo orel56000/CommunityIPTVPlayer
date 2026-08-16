@@ -128,8 +128,12 @@ const App = () => {
   useEffect(() => {
     initTvNavigation();
   }, []);
+  // @vercel/analytics only has a collector to talk to on Vercel-hosted origins;
+  // its script 404s anywhere else. The app is also served from Cloudflare Pages
+  // (ctv.1guy.dev), the local relay, and LAN addresses — all of which this
+  // excludes, along with localhost.
   const shouldRenderAnalytics =
-    typeof window !== "undefined" && !["localhost", "127.0.0.1"].includes(window.location.hostname);
+    typeof window !== "undefined" && /(^|\.)vercel\.app$/i.test(window.location.hostname);
 
   // Release-only auto-update check. Debug builds report `debug: true` from the
   // relay and are skipped, and the web build (no native runtime) never checks.

@@ -1,0 +1,19 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "community-iptv-player",
+  "main": "worker/index.ts",
+  // >= 2024-11-11 so `cache: "no-store"` in worker/index.ts is enabled.
+  "compatibility_date": "2026-08-16",
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    // React Router owns client-side routing; unmatched paths boot index.html.
+    "not_found_handling": "single-page-application",
+    // The Worker must see every request so it can force HTTPS; asset serving
+    // still happens via the ASSETS binding.
+    "run_worker_first": ["/*"]
+  },
+  // Wrangler provisions this custom domain AND its DNS record on deploy — the
+  // Workers API covers it, so it does not need a DNS-scoped token.
+  "routes": [{ "pattern": "ctv.1guy.dev", "custom_domain": true }]
+}

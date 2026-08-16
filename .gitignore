@@ -25,3 +25,6 @@ yarn-error.log*
 
 # Local implementation notes, not required for production builds
 /docs/native-relay-*.md
+
+# Cloudflare Wrangler local state
+.wrangler/

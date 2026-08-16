@@ -1,12 +1,10 @@
 {
-  "rewrites": [
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "redirects": [
     {
-      "source": "/api/(.*)",
-      "destination": "/api/$1"
-    },
-    {
-      "source": "/(.*)",
-      "destination": "/index.html"
+      "source": "/:path((?!api/).*)",
+      "destination": "https://ctv.1guy.dev/:path*",
+      "permanent": false
     }
   ]
 }

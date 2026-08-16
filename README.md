@@ -1,10 +1,13 @@
 # Community IPTV Player
 
+[![Live App](https://img.shields.io/badge/Live_App-ctv.1guy.dev-06b6d4?style=for-the-badge&logo=cloudflare&logoColor=white)](https://ctv.1guy.dev)
 [![GitHub Repository](https://img.shields.io/badge/GitHub-Repository-181717?style=for-the-badge&logo=github)](https://github.com/orel56000/CommunityIPTVPlayer)
 
 ## Live App
 
-https://community-iptv-player.vercel.app
+**https://ctv.1guy.dev**
+
+The previous address, `community-iptv-player.vercel.app`, redirects here.
 
 ## Manifesto
 
