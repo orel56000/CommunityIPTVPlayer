@@ -13,7 +13,7 @@ import type {
   SavedPlaylist,
 } from "./types/models";
 import { storage } from "./utils/storage";
-import { getShareId } from "./utils/shareId";
+import { getShareId, itemMatchesShareId } from "./utils/shareId";
 import { buildEpisodeUrl, buildWatchPath, parseWatchPath, resolveWatchDeepLink } from "./utils/watchUrl";
 import {
   buildSeriesFromCatalog,
@@ -54,6 +54,17 @@ import { backupToBackend } from "./utils/backendBackup";
 import { serializePlaylistItemsToM3u } from "./utils/exportM3u";
 import { resolveRecentDisplayItem, resolveRecentItemId } from "./utils/recentItems";
 import { buildLocalVideoItem, isLocalItem } from "./utils/localMedia";
+import { RemoteModeGate } from "./components/views/RemoteModeGate";
+import { useSyncSession } from "./hooks/useSyncSession";
+import {
+  getRemoteMode,
+  isRemoteLanClient,
+  saveRemoteMode,
+  type RemoteMode,
+  type SyncCommand,
+  type SyncFollowerReport,
+} from "./utils/syncSession";
+import { initTvNavigation } from "./utils/tvNavigation";
 
 const initialFilters: UIFilters = {
   query: "",
@@ -99,6 +110,24 @@ const App = () => {
   const updateCheckedRef = useRef(false);
   const backendConnection = useBackendConnection();
   const canPlayVideos = backendConnection.connected;
+
+  // Remote devices (another browser on http://<master-ip>:11471/) choose per
+  // session between following the master's playback and browsing normally.
+  // Local/native sessions skip the chooser entirely ("regular" from the start).
+  const [remoteMode, setRemoteMode] = useState<RemoteMode | null>(() =>
+    isRemoteLanClient() ? getRemoteMode() : "regular",
+  );
+  const remoteGateOpen = remoteMode === null;
+  const syncFollowerConfigured = remoteMode === "sync" && isRemoteLanClient();
+  const chooseRemoteMode = useCallback((mode: RemoteMode) => {
+    saveRemoteMode(mode);
+    setRemoteMode(mode);
+  }, []);
+
+  // D-pad / TV-remote spatial navigation (self-activates only in TV contexts).
+  useEffect(() => {
+    initTvNavigation();
+  }, []);
   const shouldRenderAnalytics =
     typeof window !== "undefined" && !["localhost", "127.0.0.1"].includes(window.location.hostname);
 
@@ -191,6 +220,9 @@ const App = () => {
   // changes settle (debounced). Keyed on playlist/library changes, NOT on
   // playback progress, so it doesn't churn while watching. No-op without a relay.
   useEffect(() => {
+    // A remote device is talking to the MASTER's relay — pushing this device's
+    // state there would overwrite the master's own backup file.
+    if (isRemoteLanClient()) return;
     const handle = window.setTimeout(() => {
       void backupToBackend();
     }, 6000);
@@ -298,7 +330,7 @@ const App = () => {
 
   const { favoriteSet, toggleFavorite, clearFavorites } = useFavorites(state.favorites, setFavorites);
   const { pushRecent, clearRecents } = useRecents(state.recents, setRecents);
-  const { updateProgress, setWatched, clearContinueWatching, getResumePosition } = useContinueWatching(
+  const { updateProgress, setWatched, clearContinueWatching, removeContinueWatching, getResumePosition } = useContinueWatching(
     state.continueWatching,
     setContinueWatching,
     state.progress,
@@ -335,6 +367,13 @@ const App = () => {
   }, []);
 
   useEffect(() => {
+    // Don't auto-start anything behind the remote-device chooser; and a sync
+    // follower plays what the master says, not this device's last-played item.
+    if (remoteGateOpen) return;
+    if (syncFollowerConfigured) {
+      restoredLastVisitRef.current = true;
+      return;
+    }
     if (deepLink) {
       restoredLastVisitRef.current = true;
       return;
@@ -385,6 +424,8 @@ const App = () => {
     setSection,
     setActivePlaylistId,
     warmedUp,
+    remoteGateOpen,
+    syncFollowerConfigured,
   ]);
 
   useEffect(() => {
@@ -584,6 +625,103 @@ const App = () => {
     [state.continueWatching, state.playlists],
   );
 
+  // ---- master/follower playback sync (see useSyncSession) -------------------
+
+  // Live position at timeupdate cadence, BEFORE onPlayerProgress's 5s persist
+  // throttle — sync reports/commands need the real position, not the last save.
+  const livePositionRef = useRef({ positionSec: 0, durationSec: 0 });
+  const currentItemIdForSync = playerState.currentItem?.id ?? null;
+  useEffect(() => {
+    // New item: zero the snapshot immediately, or a follower's next report
+    // would pair the NEW episode id with the OLD episode's end position and
+    // the master would mark the new episode watched on arrival.
+    livePositionRef.current = { positionSec: 0, durationSec: 0 };
+  }, [currentItemIdForSync]);
+
+  const buildSyncCommand = useCallback(
+    (item: PlaylistItem): SyncCommand | null => {
+      // A dropped file lives behind a blob URL that only this document can
+      // resolve — there is nothing a follower could play.
+      if (isLocalItem(item)) return null;
+      const playlist = state.playlists.find((p) => p.id === item.playlistId);
+      const progressEntry = progressByItemId.get(item.id);
+      return {
+        item,
+        playlistName: playlist?.name ?? "",
+        shareId: getShareId(item),
+        positionSec: progressEntry?.positionSec ?? 0,
+        durationSec: progressEntry?.durationSec ?? 0,
+      };
+    },
+    [state.playlists, progressByItemId],
+  );
+
+  const playRemoteItem = useCallback(
+    (command: SyncCommand) => {
+      const item = command.item;
+      if (!item?.id || !item.streamUrl) return;
+      // Seed the resume point with the master's position so the episode starts
+      // where the master is, not where this device last left it.
+      if (command.durationSec > 0 && command.positionSec > 0) {
+        updateProgress(item.playlistId, item.id, command.positionSec, command.durationSec);
+      } else {
+        // Master starts from the beginning (no progress entry, or the item was
+        // marked watched, which stores position 0) — drop this device's stale
+        // local resume so playback starts at 0 like the master's.
+        removeContinueWatching(item.id);
+      }
+      if (item.playlistId !== state.activePlaylistId && state.playlists.some((p) => p.id === item.playlistId)) {
+        setActivePlaylistId(item.playlistId);
+      }
+      setSection(item.section);
+      setCurrentItem(item);
+      pushRecentForItem(item);
+    },
+    [
+      state.activePlaylistId,
+      state.playlists,
+      updateProgress,
+      removeContinueWatching,
+      setActivePlaylistId,
+      setSection,
+      setCurrentItem,
+      pushRecentForItem,
+    ],
+  );
+
+  const applyRemoteProgress = useCallback(
+    (report: SyncFollowerReport) => {
+      if (!report.itemId || !(report.durationSec > 0)) return;
+      const items = state.playlists.flatMap((playlist) => playlist.items);
+      // Item ids match when the follower restored this device's backup; the
+      // shareId fallback covers a follower with its own import of the playlist.
+      let item = items.find((entry) => entry.id === report.itemId);
+      if (!item && report.shareId) {
+        const share = report.shareId;
+        item = items.find((entry) => itemMatchesShareId(entry, share));
+      }
+      if (!item) return;
+      // While this device is actively playing the same item, its own progress
+      // is fresher — don't tug the resume point back and forth.
+      if (playerState.currentItem?.id === item.id && playerState.isPlaying) return;
+      updateProgress(item.playlistId, item.id, report.positionSec, report.durationSec);
+    },
+    [state.playlists, playerState.currentItem, playerState.isPlaying, updateProgress],
+  );
+
+  const syncSession = useSyncSession({
+    connected: backendConnection.connected,
+    remoteMode,
+    savedBackendOrigin: backendConnection.savedBackendOrigin,
+    currentItem: playerState.currentItem,
+    isPlaying: playerState.isPlaying,
+    buildCommand: buildSyncCommand,
+    getLivePosition: () => livePositionRef.current,
+    playRemoteItem,
+    applyRemoteProgress,
+  });
+  const syncFollowerActive = syncSession.role === "follower";
+
   const openSearch = useCallback((focus?: SearchOpenFocus | null) => {
     setSearchFocus(focus ?? null);
     setSearchOpen(true);
@@ -606,6 +744,8 @@ const App = () => {
     // Same warm-up hold as the launch restore: don't attach a video into a
     // cold WebView (audio-only/black-layer state).
     if (!warmedUp) return;
+    // Never auto-play behind the remote-device chooser.
+    if (remoteGateOpen) return;
     const { playlistName, shareId } = deepLink;
     const key = `${playlistName}\0${shareId}`;
 
@@ -698,6 +838,7 @@ const App = () => {
     state.lastPlayedWatch,
     state.playlists,
     warmedUp,
+    remoteGateOpen,
   ]);
 
   const handleToggleFavorite = (item: PlaylistItem) => toggleFavorite(item.playlistId, item.id);
@@ -1103,6 +1244,9 @@ const App = () => {
     if (!playerState.currentItem) return;
     // A dropped file has no library entry to resume into.
     if (isLocalItem(playerState.currentItem)) return;
+    if (Number.isFinite(positionSec) && Number.isFinite(durationSec) && durationSec > 0) {
+      livePositionRef.current = { positionSec, durationSec };
+    }
     const id = playerState.currentItem.id;
     const lastSaved = lastProgressRef.current[id] ?? 0;
     if (Math.abs(positionSec - lastSaved) < 5 && positionSec < durationSec - 1) return;
@@ -1232,8 +1376,32 @@ const App = () => {
     />
   );
 
+  // Remote device, first visit this session: choose sync vs regular before the
+  // app (and its auto-restore effects, held via remoteGateOpen) does anything.
+  // The click on this page is also the autoplay-unlock gesture for TV browsers.
+  if (remoteGateOpen) {
+    return (
+      <div className="flex h-full flex-col overflow-hidden bg-slate-950">
+        <RemoteModeGate onChoose={chooseRemoteMode} />
+      </div>
+    );
+  }
+
   return (
     <div className="flex h-full flex-col overflow-hidden text-slate-100">
+      {syncFollowerActive ? (
+        <div className="fixed bottom-4 left-4 z-50 flex items-center gap-2 rounded-full border border-cyan-400/40 bg-slate-900/90 px-3 py-1.5 text-xs text-cyan-200 shadow-lg">
+          <span className="h-2 w-2 animate-pulse rounded-full bg-cyan-400" aria-hidden />
+          Synced to master
+          <button
+            type="button"
+            className="ml-1 rounded-full px-2 py-0.5 text-slate-300 hover:bg-slate-700/60 hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-400"
+            onClick={() => chooseRemoteMode("regular")}
+          >
+            Leave
+          </button>
+        </div>
+      ) : null}
       <Header
         currentItem={playerState.currentItem}
         rightPanelOpen={state.settings.rightPanelOpen}
@@ -1267,7 +1435,9 @@ const App = () => {
               // player filling the column next to the right sidebar.
               className="aspect-video w-full shrink-0 sm:aspect-auto sm:min-h-0 sm:w-auto sm:flex-1 sm:shrink"
               item={playerState.currentItem}
-              autoplay={state.settings.autoplay}
+              // A sync follower must start playback without a click — the
+              // master, not the user in front of this screen, chose the item.
+              autoplay={state.settings.autoplay || syncFollowerActive}
               volume={playerState.volume}
               muted={playerState.muted}
               volumePercentMode={state.settings.volumePercentMode}
@@ -1374,6 +1544,7 @@ const App = () => {
       <BackendConnectionModal
         open={connectionOpen}
         connection={backendConnection}
+        syncFollowers={syncSession.followers}
         onClose={() => setConnectionOpen(false)}
       />
       {shouldRenderAnalytics ? <Analytics /> : null}

@@ -272,3 +272,26 @@ html.light aside {
 .panel-scroll::-webkit-scrollbar-thumb:hover {
   background: rgba(148, 163, 184, 0.55);
 }
+
+/* TV / D-pad navigation focus (src/utils/tvNavigation.ts sets data-tvnav).
+   Viewed from ~3 meters, so much stronger than the desktop focus-visible
+   rings above, and clearly distinct from the cyan .card-tile-active "now
+   playing" ring. Plain :focus, not :focus-visible — programmatic focus from
+   the D-pad engine doesn't always set :focus-visible. */
+html[data-tvnav="1"] :focus {
+  outline: 3px solid rgb(34 211 238);
+  outline-offset: 2px;
+}
+
+html[data-tvnav="1"] :focus:not(:focus-visible) {
+  outline: 3px solid rgb(34 211 238);
+  outline-offset: 2px;
+}
+
+/* Full-card play buttons sit INSIDE .card-tile; light up the whole card. */
+html[data-tvnav="1"] .card-tile:focus-within {
+  outline: 3px solid rgb(34 211 238);
+  outline-offset: 2px;
+  box-shadow: 0 0 28px -4px rgba(34, 211, 238, 0.55);
+  transform: scale(1.02);
+}

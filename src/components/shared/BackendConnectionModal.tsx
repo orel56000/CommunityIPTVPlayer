@@ -1,7 +1,8 @@
-import { useMemo, useState } from "react";
-import { Check, Copy, Download, MonitorDown, Server, Unplug, X } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { Check, Copy, Download, MonitorDown, MonitorPlay, Server, Unplug, X } from "lucide-react";
 import type { BackendConnectionState } from "../../hooks/useBackendConnection";
 import { RELAY_ORIGIN, normalizeBackendOrigin } from "../../utils/relayDiscovery";
+import type { SyncFollowerReport } from "../../utils/syncSession";
 
 const RELEASES_URL = "https://github.com/orel56000/CommunityIPTVPlayer/releases";
 
@@ -13,8 +14,19 @@ interface BackendConnectionModalProps {
     useSelf: () => void;
     disconnect: () => void;
   };
+  /** Devices currently following this app's playback in sync mode. */
+  syncFollowers?: SyncFollowerReport[];
   onClose: () => void;
 }
+
+const formatClock = (totalSec: number): string => {
+  if (!Number.isFinite(totalSec) || totalSec < 0) return "0:00";
+  const sec = Math.floor(totalSec % 60);
+  const min = Math.floor((totalSec / 60) % 60);
+  const hr = Math.floor(totalSec / 3600);
+  const mm = hr > 0 ? String(min).padStart(2, "0") : String(min);
+  return `${hr > 0 ? `${hr}:` : ""}${mm}:${String(sec).padStart(2, "0")}`;
+};
 
 const copyText = async (value: string): Promise<boolean> => {
   try {
@@ -31,7 +43,7 @@ const statusText = (connected: boolean, relayBase: string): string => {
   return `Using ${relayBase}`;
 };
 
-export const BackendConnectionModal = ({ open, connection, onClose }: BackendConnectionModalProps) => {
+export const BackendConnectionModal = ({ open, connection, syncFollowers = [], onClose }: BackendConnectionModalProps) => {
   const [input, setInput] = useState(connection.savedBackendOrigin || RELAY_ORIGIN);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -43,6 +55,20 @@ export const BackendConnectionModal = ({ open, connection, onClose }: BackendCon
     const all = connection.canServe ? [currentOrigin, ...fromInfo] : fromInfo;
     return Array.from(new Set(all.filter((value) => /^https?:\/\//i.test(value))));
   }, [connection.canServe, connection.serverInfo?.origins]);
+
+  // Escape (and the TV-remote Back key, which tvNavigation translates to a
+  // window-level Escape) closes the modal.
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      onClose();
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [open, onClose]);
 
   if (!open) return null;
 
@@ -79,7 +105,12 @@ export const BackendConnectionModal = ({ open, connection, onClose }: BackendCon
   })();
 
   return (
-    <div className="fixed inset-0 z-[70] flex items-start justify-center overflow-y-auto bg-slate-950/75 p-3 pt-[max(1rem,env(safe-area-inset-top))] backdrop-blur-md sm:p-6 sm:pt-16">
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Backend connection"
+      className="fixed inset-0 z-[70] flex items-start justify-center overflow-y-auto bg-slate-950/75 p-3 pt-[max(1rem,env(safe-area-inset-top))] backdrop-blur-md sm:p-6 sm:pt-16"
+    >
       <div className="panel w-full max-w-2xl overflow-hidden">
         <div className="flex items-start justify-between gap-3 border-b border-white/[0.08] px-4 py-4 sm:px-5">
           <div className="min-w-0">
@@ -154,6 +185,31 @@ export const BackendConnectionModal = ({ open, connection, onClose }: BackendCon
               </div>
             </section>
           )}
+
+          {syncFollowers.length > 0 ? (
+            <section className="rounded-xl border border-white/[0.08] bg-white/[0.04] p-3.5">
+              <div className="flex items-center gap-2">
+                <MonitorPlay size={16} className="text-cyan-300" aria-hidden />
+                <p className="text-sm font-semibold text-slate-100">Synced devices</p>
+              </div>
+              <div className="mt-2 space-y-1.5">
+                {syncFollowers.map((follower) => (
+                  <div key={follower.id} className="flex min-w-0 items-center gap-2 text-xs text-slate-300">
+                    <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${follower.playing ? "bg-cyan-400" : "bg-slate-500"}`} aria-hidden />
+                    <span className="shrink-0 font-medium text-slate-200">{follower.name}</span>
+                    {follower.title ? (
+                      <span className="min-w-0 truncate text-slate-400">
+                        {follower.title}
+                        {follower.durationSec > 0 ? ` · ${formatClock(follower.positionSec)} / ${formatClock(follower.durationSec)}` : ""}
+                      </span>
+                    ) : (
+                      <span className="text-slate-500">idle</span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </section>
+          ) : null}
 
           <section className="rounded-xl border border-white/[0.08] bg-white/[0.04] p-3.5">
             <label className="text-sm font-semibold text-slate-100" htmlFor="backend-origin">

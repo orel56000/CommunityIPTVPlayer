@@ -152,6 +152,11 @@ const UPSTREAM_HEADERS_TIMEOUT: Duration = Duration::from_secs(12);
 /// own `fetch()` calls. Bounded so a long debug session can't grow unbounded.
 const DEBUG_LOG_CAPACITY: usize = 500;
 
+/// Sync followers that haven't reported for this long are dropped from the
+/// roster. A TV in sync mode polls every few seconds, so 30s of silence means
+/// the browser was closed or navigated away — not that one poll ran late.
+const SYNC_FOLLOWER_TTL: Duration = Duration::from_secs(30);
+
 // ---------------------------------------------------------------------------
 // Shared state
 // ---------------------------------------------------------------------------
@@ -258,6 +263,32 @@ struct PumpSeed {
     ring: Arc<Mutex<StreamRing>>,
 }
 
+/// One follower's latest self-reported playback state (see `SyncShared`).
+/// The report body is opaque JSON owned by the frontend; `at` is the relay's
+/// own clock, used only for pruning followers that stopped polling.
+struct SyncFollower {
+    report: serde_json::Value,
+    at: Instant,
+}
+
+/// Playback-sync channel between the master device (the app's own WebView)
+/// and follower devices (TV browsers on the LAN in sync mode).
+///
+/// The relay is a mailbox, not a participant: the master POSTs an opaque
+/// "now playing" command, followers poll it and POST their own state back.
+/// The frontend owns the JSON schema on both sides — the relay only stamps
+/// `seq`/`at` so followers can detect a NEW command (seq changed) without
+/// the relay understanding what the command says.
+#[derive(Default)]
+struct SyncShared {
+    /// Monotonic command sequence. 0 = no command ever posted.
+    seq: u64,
+    /// Latest master "now playing" command, opaque JSON owned by the frontend.
+    command: Option<serde_json::Value>,
+    /// Latest report per follower id (TV browsers in sync mode).
+    followers: HashMap<String, SyncFollower>,
+}
+
 #[derive(Clone)]
 pub struct RelayState {
     /// reqwest client reused across VOD requests (redirects, connection pool).
@@ -303,6 +334,10 @@ pub struct RelayState {
     /// 1=available, 2=unavailable. Lets heavy (4K/HEVC) transcodes run on the
     /// GPU in real time instead of choking libx264 on the CPU.
     nvenc: Arc<AtomicU8>,
+    /// Playback-sync mailbox (see `SyncShared`): the master WebView's latest
+    /// "now playing" command plus the roster of LAN follower reports, all
+    /// opaque JSON. Served by `/api/sync{,/command,/report}`.
+    sync: Arc<Mutex<SyncShared>>,
     /// Directory for the durable playlist backup file (a stable on-disk copy of
     /// the user's playlists, independent of the WebView storage profile).
     backup_dir: Option<Arc<PathBuf>>,
@@ -352,6 +387,7 @@ impl RelayState {
             debug_log: Arc::new(Mutex::new(VecDeque::new())),
             debug_seq: Arc::new(AtomicU64::new(1)),
             nvenc: Arc::new(AtomicU8::new(0)),
+            sync: Arc::new(Mutex::new(SyncShared::default())),
             backup_dir: backup_dir.map(Arc::new),
             #[cfg(desktop)]
             app,
@@ -880,7 +916,13 @@ pub fn router(
             get(backup_get)
                 .put(backup_put)
                 .route_layer(axum::extract::DefaultBodyLimit::max(256 * 1024 * 1024)),
-        );
+        )
+        // Playback sync: the master WebView posts a "now playing" command
+        // (loopback-only), TV browsers on the LAN poll it and report their own
+        // state back. Bodies are tiny JSON — the default body limit is plenty.
+        .route("/api/sync", get(sync_get))
+        .route("/api/sync/command", post(sync_command_post))
+        .route("/api/sync/report", post(sync_report_post));
 
     // Native window fullscreen — desktop only. macOS WKWebView can't use the
     // element Fullscreen API (enabling it breaks video rendering), so the
@@ -1304,6 +1346,132 @@ async fn backup_put(State(state): State<RelayState>, body: axum::body::Bytes) ->
         Ok(_) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// /api/sync — playback sync between the app (master) and LAN TVs (followers)
+// ---------------------------------------------------------------------------
+//
+// The app's own WebView is the master: it publishes an opaque "now playing"
+// command, and TV browsers in sync mode poll it and mirror playback. The relay
+// only ferries JSON between them — the frontend owns the schema entirely, so
+// the contract here is just "seq changed ⇒ new command".
+
+/// Drop followers that stopped polling. Runs in both read paths so a master
+/// that only ever GETs `/api/sync` still sees a live roster, not the ghosts
+/// of every TV that ever connected.
+fn prune_followers(sync: &mut SyncShared) {
+    sync.followers
+        .retain(|_, f| f.at.elapsed() <= SYNC_FOLLOWER_TTL);
+}
+
+/// Shared "parse body as a JSON object" step for the two POST endpoints. The
+/// relay treats the contents as opaque, but it must at least be an object —
+/// the handlers inject bookkeeping fields (`seq`, `at`) into it.
+fn parse_json_object(body: &Bytes) -> Option<serde_json::Value> {
+    let value: serde_json::Value = serde_json::from_slice(body).ok()?;
+    value.is_object().then_some(value)
+}
+
+/// GET /api/sync — current command + follower roster.
+///
+/// Deliberately open to the LAN (no loopback gate): a follower TV must be able
+/// to read the command to obey it, and the payload is only "what's playing" —
+/// nothing here grants control (that's `/api/sync/command`, which is gated).
+async fn sync_get(State(state): State<RelayState>) -> Response {
+    let mut sync = state.sync.lock().await;
+    prune_followers(&mut sync);
+    let followers: Vec<serde_json::Value> =
+        sync.followers.values().map(|f| f.report.clone()).collect();
+    let body = serde_json::json!({
+        "seq": sync.seq,
+        "command": sync.command,
+        "followers": followers,
+    });
+    ([(header::CONTENT_TYPE, "application/json")], body.to_string()).into_response()
+}
+
+/// POST /api/sync/command — the master publishes a "now playing" command.
+///
+/// Loopback-only, same reasoning as `/api/debug/log`: the relay binds 0.0.0.0
+/// with no authentication BY DESIGN (a TV browser can't do auth handshakes),
+/// so the only thing separating "may drive everyone's playback" from "may
+/// merely follow it" is the network position of the caller. Only the device
+/// that owns the relay — the app's own WebView, always a loopback peer — gets
+/// to be master.
+async fn sync_command_post(
+    State(state): State<RelayState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    body: Bytes,
+) -> Response {
+    if !peer.ip().is_loopback() {
+        return cors_text(StatusCode::FORBIDDEN, "loopback only".to_string());
+    }
+    let Some(mut command) = parse_json_object(&body) else {
+        return cors_text(
+            StatusCode::BAD_REQUEST,
+            "Body must be a JSON object".to_string(),
+        );
+    };
+    let mut sync = state.sync.lock().await;
+    sync.seq += 1;
+    // Stamp the command so a follower can tell NEW (seq advanced) from
+    // "still the same one", and how stale it is, without the relay knowing
+    // anything else about it.
+    if let Some(obj) = command.as_object_mut() {
+        obj.insert("seq".to_string(), serde_json::json!(sync.seq));
+        obj.insert("at".to_string(), serde_json::json!(now_ms()));
+    }
+    sync.command = Some(command);
+    (
+        [(header::CONTENT_TYPE, "application/json")],
+        serde_json::json!({ "seq": sync.seq }).to_string(),
+    )
+        .into_response()
+}
+
+/// POST /api/sync/report — a follower reports its own playback state.
+///
+/// Open to the LAN for the same reason `/api/sync` is: followers ARE the LAN
+/// peers. A report only overwrites that follower's own roster slot (keyed by
+/// its self-chosen id) — it can't touch the command or other followers. The
+/// response carries the current command so a follower learns about new
+/// commands in the same round-trip and never needs a second poll.
+async fn sync_report_post(State(state): State<RelayState>, body: Bytes) -> Response {
+    let Some(mut report) = parse_json_object(&body) else {
+        return cors_text(
+            StatusCode::BAD_REQUEST,
+            "Body must be a JSON object".to_string(),
+        );
+    };
+    let id = match report.get("id").and_then(serde_json::Value::as_str) {
+        Some(id) if !id.is_empty() => id.to_string(),
+        _ => {
+            return cors_text(
+                StatusCode::BAD_REQUEST,
+                "Body must contain a non-empty string \"id\"".to_string(),
+            )
+        }
+    };
+    if let Some(obj) = report.as_object_mut() {
+        obj.insert("at".to_string(), serde_json::json!(now_ms()));
+    }
+    let mut sync = state.sync.lock().await;
+    // Prune here too — reports arrive constantly while any TV is in sync
+    // mode, so the roster stays fresh even for a master that only GETs.
+    prune_followers(&mut sync);
+    sync.followers.insert(
+        id,
+        SyncFollower {
+            report,
+            at: Instant::now(),
+        },
+    );
+    let body = serde_json::json!({
+        "seq": sync.seq,
+        "command": sync.command,
+    });
+    ([(header::CONTENT_TYPE, "application/json")], body.to_string()).into_response()
 }
 
 #[derive(Serialize)]

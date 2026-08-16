@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { ExternalLink, Server, Settings, X } from "lucide-react";
 import clsx from "clsx";
 import { GitHubIcon } from "../shared/GitHubIcon";
@@ -39,7 +40,22 @@ export const MobileMenu = ({
   backendStatus,
   onOpenBackendConnection,
   onOpenSettings,
-}: MobileMenuProps) => (
+}: MobileMenuProps) => {
+  // Escape closes the drawer — also what the TV-remote Back key is translated
+  // to (tvNavigation dispatches a window-level Escape for open dialogs).
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      onClose();
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [open, onClose]);
+
+  return (
   <div className={clsx("fixed inset-0 z-40 sm:hidden", !open && "pointer-events-none")} aria-hidden={!open}>
     <button
       type="button"
@@ -107,4 +123,5 @@ export const MobileMenu = ({
       </div>
     </div>
   </div>
-);
+  );
+};

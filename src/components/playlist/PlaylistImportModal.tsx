@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { PlaylistSource } from "../../types/models";
 
 interface PlaylistImportModalProps {
@@ -31,6 +31,20 @@ export const PlaylistImportModal = ({
   const [xtreamPassword, setXtreamPassword] = useState("");
   const [xtreamOutput, setXtreamOutput] = useState<"ts" | "m3u8">("ts");
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Escape (and the TV-remote Back key, which tvNavigation translates to a
+  // window-level Escape) closes the modal — but never mid-import.
+  useEffect(() => {
+    if (!open || loading) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      onClose();
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [open, loading, onClose]);
 
   if (!open) return null;
 
@@ -73,7 +87,12 @@ export const PlaylistImportModal = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/85 p-4">
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Import playlist"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/85 p-4"
+    >
       <div className="panel w-full max-w-2xl space-y-4 p-5">
         <div className="flex items-center justify-between">
           <h2 className="text-lg font-semibold">Import Playlist</h2>

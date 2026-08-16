@@ -78,6 +78,8 @@ The application is designed as a practical tool rather than a limited demonstrat
 - Save favorites, recents, continue watching progress, and settings in local storage.
 - Suggest the next episode when the end credits start — see [docs/credits-detection.md](docs/credits-detection.md).
 - Export and import app state as JSON.
+- TV-remote (D-pad) navigation: arrows move focus, OK activates, Back closes — enabled automatically on TV browsers and for devices connected over the LAN (`?tv=1` forces it).
+- Sync to master: open the app's LAN address (for example `http://192.168.1.23:11471`) on a TV, choose "Sync to master", and the TV mirrors whatever the app plays — episodes advance automatically, and anything watched on the TV is marked watched on the main device.
 
 ## Technical Approach
 
