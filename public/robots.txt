@@ -1,0 +1,13 @@
+# https://ctv.1guy.dev — the player is public and crawlable.
+#
+# This file has to exist as a real asset: wrangler.jsonc sets
+# not_found_handling to "single-page-application", so any path without a
+# matching file falls through to index.html. Without this, /robots.txt
+# answered 200 with an HTML document.
+User-agent: *
+Allow: /
+
+# The relay is a byte pipe for media, not content worth indexing.
+Disallow: /api/
+
+Sitemap: https://ctv.1guy.dev/sitemap.xml
