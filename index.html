@@ -3,7 +3,10 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="description" content="Community IPTV Player (CTV), a local IPTV player and playlist manager" />
+    <meta
+      name="description"
+      content="Free, open source IPTV player. Open any M3U playlist and stream live TV, movies and series with HLS, picture-in-picture and favourites — no account, no ads. Also on macOS and Windows."
+    />
     <meta name="theme-color" content="#030712" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
@@ -12,7 +15,63 @@
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="apple-touch-icon" href="/pwa-192.png" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <title>Community IPTV Player</title>
+    <title>Community IPTV Player — free IPTV streaming in your browser</title>
+    <meta name="author" content="orel" />
+    <meta
+      name="robots"
+      content="index, follow, max-image-preview:large, max-snippet:-1"
+    />
+    <link rel="canonical" href="https://ctv.1guy.dev/" />
+
+    <!-- Open Graph -->
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Community IPTV Player" />
+    <meta property="og:locale" content="en_US" />
+    <meta property="og:url" content="https://ctv.1guy.dev/" />
+    <meta property="og:title" content="Community IPTV Player — free IPTV streaming in your browser" />
+    <meta
+      property="og:description"
+      content="Open any M3U playlist and stream live TV, movies and series with HLS, picture-in-picture and favourites. Free and open source, no account and no ads."
+    />
+    <meta property="og:image" content="https://ctv.1guy.dev/og-image.png" />
+    <meta property="og:image:type" content="image/png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta
+      property="og:image:alt"
+      content="Community IPTV Player — free IPTV streaming, straight in the browser. Supports M3U, HLS, live TV and desktop apps."
+    />
+
+    <!-- Twitter / X -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Community IPTV Player — free IPTV streaming in your browser" />
+    <meta
+      name="twitter:description"
+      content="Open any M3U playlist and stream live TV, movies and series. Free and open source, no account and no ads."
+    />
+    <meta name="twitter:image" content="https://ctv.1guy.dev/og-image.png" />
+
+    <!-- Not executed, so this is a CSP data block rather than a script block. -->
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        "name": "Community IPTV Player",
+        "alternateName": "CTV",
+        "url": "https://ctv.1guy.dev/",
+        "description": "A free, open source IPTV player that runs in the browser. Import M3U playlists from a URL, raw text or a local file, then stream live TV, movies, series and catch-up with HLS playback, picture-in-picture and fullscreen. Playlists, favourites, recents and watch progress are stored locally in the browser.",
+        "applicationCategory": "MultimediaApplication",
+        "operatingSystem": "Web browser, macOS, Windows",
+        "browserRequirements": "Requires a browser with HLS or native HTML5 video playback.",
+        "keywords": "IPTV, M3U, HLS, live TV, streaming, player, playlist, free, open source",
+        "isAccessibleForFree": true,
+        "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+        "license": "https://opensource.org/licenses/MIT",
+        "codeRepository": "https://github.com/orel56000/CommunityIPTVPlayer",
+        "author": { "@type": "Person", "name": "orel", "url": "https://1guy.dev/" },
+        "isPartOf": { "@type": "WebSite", "name": "1guy.dev", "url": "https://1guy.dev/" }
+      }
+    </script>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link

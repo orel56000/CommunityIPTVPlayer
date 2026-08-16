@@ -1,0 +1,38 @@
+# Community IPTV Player (CTV)
+
+> A free, open source IPTV player that runs in the browser. Import any M3U playlist and stream
+> live TV, movies, series and catch-up — no account, no ads, and nothing stored on a server.
+
+Community IPTV Player is hosted at https://ctv.1guy.dev. It is a frontend-only application:
+playlists, favourites, recents, watch progress and settings are all persisted in the browser's
+local storage, and the app can export or import that state as JSON. There is no sign-up, no paid
+tier and no advertising.
+
+The project is also a deliberate argument that AI-written software can be released as free and
+open source and still compete with paid players. It is MIT licensed and open to reuse.
+
+This file exists because the interface is client-rendered: a fetcher that does not execute
+JavaScript sees an empty document, so the description below is the readable version.
+
+## Capabilities
+
+- Import M3U playlists from a URL, pasted text, or a local file, and manage several of them.
+- Browse live TV, movies, series and catch-up content.
+- Playback with HLS support and native fallback, picture-in-picture, fullscreen and standard
+  transport controls.
+- Favourites, recents, continue-watching progress and per-playlist settings, all stored locally.
+- Export and import the full application state as JSON.
+- Installable as a PWA, and packaged as desktop apps for macOS and Windows.
+
+## Notes for automated clients
+
+- `/api/stream` is a server-side relay that proxies upstream media so the browser is not subject
+  to the provider's CORS rules. It is a byte pipe for media, not an API worth crawling, and
+  /robots.txt disallows `/api/`.
+- The player ships no channel list or playlist of its own. Users supply their own sources.
+
+## Links
+
+- [Community IPTV Player](https://ctv.1guy.dev): the player itself.
+- [Source on GitHub](https://github.com/orel56000/CommunityIPTVPlayer): MIT licensed.
+- [1guy.dev](https://1guy.dev): the other free tools by the same author.
