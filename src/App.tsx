@@ -88,6 +88,9 @@ const App = () => {
   const syncedPlaylistIdsRef = useRef<Set<string>>(new Set());
   const restoredLastVisitRef = useRef(false);
   const appliedDeepLinkKey = useRef<string | null>(null);
+  // Deep link the "connect a backend first" modal has already been raised for.
+  // The modal is a prompt, not a gate: once dismissed it must stay dismissed.
+  const promptedBackendKey = useRef<string | null>(null);
   const [deepLinkError, setDeepLinkError] = useState<string | null>(null);
   const [loadingSeriesId, setLoadingSeriesId] = useState<string | null>(null);
   const [connectionOpen, setConnectionOpen] = useState(false);
@@ -391,6 +394,12 @@ const App = () => {
 
     const watch = state.lastPlayedWatch;
     if (watch) {
+      // Same hold as the lastPlayedId branch below: with no backend the watch
+      // URL can only produce a "connect first" prompt over an empty player, and
+      // it keeps the deep-link effect live for the rest of the visit. Stay on
+      // "/" (ref left unset, so the restore still runs once a backend connects)
+      // — the player then stays free for a dropped local file, which needs none.
+      if (!canPlayVideos) return;
       restoredLastVisitRef.current = true;
       navigate(buildWatchPath(watch.playlistName, watch.shareId), { replace: true });
       return;
@@ -460,6 +469,7 @@ const App = () => {
   useEffect(() => {
     if (!deepLink) {
       appliedDeepLinkKey.current = null;
+      promptedBackendKey.current = null;
       setDeepLinkError(null);
     }
   }, [deepLink]);
@@ -743,6 +753,12 @@ const App = () => {
     setConnectionOpen(true);
   }, []);
 
+  // That banner describes a refusal that no longer applies once a backend is
+  // up — don't leave it under the player for the rest of the visit.
+  useEffect(() => {
+    if (canPlayVideos) setConnectionPlaybackError(null);
+  }, [canPlayVideos]);
+
   useEffect(() => {
     if (!deepLink) return;
     // Same warm-up hold as the launch restore: don't attach a video into a
@@ -752,6 +768,17 @@ const App = () => {
     if (remoteGateOpen) return;
     const { playlistName, shareId } = deepLink;
     const key = `${playlistName}\0${shareId}`;
+
+    // Raise the backend modal at most once per link. This effect re-runs on
+    // nearly every render (pushRecentForItem's identity is not stable), so
+    // calling showBackendRequired() unconditionally reopened the modal the
+    // instant the user closed it. The inline "not connected" banner below the
+    // player stays up either way, with its own way back into the modal.
+    const promptBackendOnce = () => {
+      if (promptedBackendKey.current === key) return;
+      promptedBackendKey.current = key;
+      showBackendRequired();
+    };
 
     const hints: { itemId?: string | null } = {};
     if (state.lastPlayedWatch?.playlistName === playlistName && state.lastPlayedWatch?.shareId === shareId) {
@@ -783,7 +810,7 @@ const App = () => {
         }
         if (appliedDeepLinkKey.current === key) return;
         if (!canPlayVideos) {
-          showBackendRequired();
+          promptBackendOnce();
           return;
         }
         appliedDeepLinkKey.current = key;
@@ -817,7 +844,7 @@ const App = () => {
     if (appliedDeepLinkKey.current === key) return;
     if (!canPlayVideos) {
       setDeepLinkError(null);
-      showBackendRequired();
+      promptBackendOnce();
       return;
     }
     appliedDeepLinkKey.current = key;
@@ -1216,6 +1243,9 @@ const App = () => {
       const objectUrl = URL.createObjectURL(file);
       localObjectUrlRef.current = objectUrl;
       setLocalMediaInfo(null);
+      // A blob URL needs no backend, so any earlier "not connected" refusal is
+      // no longer about what's on screen.
+      setConnectionPlaybackError(null);
       setCurrentItem(buildLocalVideoItem(file, objectUrl));
       // Drop the watch URL. It describes a library item that is no longer on
       // screen, and leaving it up keeps the deep-link effect live: it would
