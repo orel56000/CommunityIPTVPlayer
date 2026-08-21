@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { ExternalLink, Server, Settings, X } from "lucide-react";
+import { ExternalLink, LayoutGrid, Server, Settings, X } from "lucide-react";
 import clsx from "clsx";
 import { GitHubIcon } from "../shared/GitHubIcon";
 import type { RelayStatus } from "../../utils/relayDiscovery";
@@ -30,7 +30,8 @@ const statusLabel = (status: RelayStatus): string =>
 
 /**
  * Phone-only slide-in drawer (from the right) that holds the utility actions that
- * used to crowd the header — backend connection, settings, GitHub. Hidden on
+ * used to crowd the header — backend connection, settings, GitHub, the link
+ * back to the 1guy.dev tool directory. Hidden on
  * `sm+`, where those live in the header. The playlists + details panels sit on
  * the home screen under the player, not in here.
  */
@@ -118,6 +119,11 @@ export const MobileMenu = ({
         >
           <GitHubIcon className="h-4 w-4 shrink-0 text-slate-200" />
           <span className="flex-1 text-left">GitHub</span>
+          <ExternalLink size={14} className="shrink-0 text-slate-500" aria-hidden />
+        </a>
+        <a className="btn w-full justify-start gap-3" href="https://1guy.dev">
+          <LayoutGrid size={16} className="shrink-0 text-slate-200" />
+          <span className="flex-1 text-left">More tools at 1guy.dev</span>
           <ExternalLink size={14} className="shrink-0 text-slate-500" aria-hidden />
         </a>
       </div>

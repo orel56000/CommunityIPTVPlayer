@@ -1,4 +1,4 @@
-import { ChevronRight, Menu, MonitorPlay, PanelRightClose, PanelRightOpen, Search, Server } from "lucide-react";
+import { ChevronRight, LayoutGrid, Menu, MonitorPlay, PanelRightClose, PanelRightOpen, Search, Server } from "lucide-react";
 import type { PlaylistItem } from "../../types/models";
 import { GitHubIcon } from "../shared/GitHubIcon";
 import type { RelayStatus } from "../../utils/relayDiscovery";
@@ -153,6 +153,20 @@ export const Header = ({
           >
             {rightPanelOpen ? <PanelRightClose size={16} /> : <PanelRightOpen size={16} />}
           </button>
+        </div>
+        {/* The way back to the tool directory this player belongs to. The
+            wordmark only appears where the header has room; below that the
+            grid icon carries it, and phones get the drawer entry instead. */}
+        <div className="hidden sm:block">
+          <a
+            className="btn border-white/10 bg-white/[0.04] px-2.5 py-2 text-sm lg:px-3"
+            href="https://1guy.dev"
+            aria-label="More free tools at 1guy.dev"
+            title="More free tools at 1guy.dev"
+          >
+            <LayoutGrid size={16} className="shrink-0 text-slate-200" />
+            <span className="hidden text-slate-300 lg:inline">1guy.dev</span>
+          </a>
         </div>
         <div className="hidden sm:block">
           <a
