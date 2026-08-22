@@ -1235,6 +1235,16 @@ const App = () => {
    */
   const localObjectUrlRef = useRef<string | null>(null);
   const staleObjectUrlsRef = useRef<string[]>([]);
+  /**
+   * The File itself, kept alongside its blob: URL.
+   *
+   * The URL is all playback needs, but automatic subtitle sync has to DECODE
+   * the audio, and a blob: URL can only be read by pulling the whole thing into
+   * memory — untenable for the multi-gigabyte files this is most useful on. The
+   * File can be read lazily, so it is what gets handed to the sync engine.
+   * Holding it costs nothing: the blob: URL already pins the same bytes.
+   */
+  const [localFile, setLocalFile] = useState<File | null>(null);
   const handlePlayLocalFile = useCallback(
     (file: File) => {
       // Retire the previous blob rather than revoking it here — the <video> is
@@ -1246,6 +1256,7 @@ const App = () => {
       // A blob URL needs no backend, so any earlier "not connected" refusal is
       // no longer about what's on screen.
       setConnectionPlaybackError(null);
+      setLocalFile(file);
       setCurrentItem(buildLocalVideoItem(file, objectUrl));
       // Drop the watch URL. It describes a library item that is no longer on
       // screen, and leaving it up keeps the deep-link effect live: it would
@@ -1483,6 +1494,9 @@ const App = () => {
               onEnded={onPlayerEnded}
               resumeFrom={currentResume}
               onPlayLocalFile={handlePlayLocalFile}
+              // Only while THAT file is what's on screen — playing something
+              // else must not leave the previous file's audio as the reference.
+              localFile={isLocalItem(playerState.currentItem) ? localFile : null}
               onMediaInfo={(info) => {
                 if (isLocalItem(playerState.currentItem)) setLocalMediaInfo(info);
               }}

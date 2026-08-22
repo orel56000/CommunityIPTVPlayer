@@ -16,6 +16,11 @@ const copyHeader = (
 // Dev-server equivalents of the serverless endpoints. On localhost the upstream
 // sees YOUR residential IP, which is what makes IP-locked providers work here.
 export default defineConfig({
+  // The subtitle-sync worker (src/workers/subsync.worker.ts) is an ES module
+  // and imports the aligner from src/utils. Vite's default worker format is
+  // "iife", which cannot carry those imports through `vite build` — dev works
+  // either way, so without this the worker only breaks in production.
+  worker: { format: "es" },
   plugins: [
     react(),
     {

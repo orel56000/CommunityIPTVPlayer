@@ -35,6 +35,35 @@ export interface UseSubtitlesReturn {
   hint: string | null;
   /** True once an embedded track or an added file exists. */
   hasSubtitles: boolean;
+  /**
+   * Replace the selected track's cues with synced ones, keeping the original
+   * for `undoSyncedCues`.
+   *
+   * An EMBEDDED selection is promoted to a new external entry rather than
+   * edited in place: the self-healing watchdog below re-mirrors an embedded
+   * track from its source every two seconds, so synced cues written over it
+   * would be silently reverted within the next tick.
+   *
+   * Pass `forTrackId` to make the write conditional on that track still being
+   * the selected one — a long-running sync must not land on a track the user
+   * switched to while it was working. Returns whether the cues were applied.
+   */
+  applySyncedCues: (cues: SubtitleCue[], label?: string, forTrackId?: string) => boolean;
+  /** Put back the cues (and the delay) from before the last apply. */
+  undoSyncedCues: () => void;
+  canUndoSyncedCues: boolean;
+  /**
+   * Cues from a DIFFERENT track, for use as a sync reference.
+   *
+   * ffsubsync's default is to align against the video's own subtitles when it
+   * has any, and only fall back to listening to the audio. This is that: an
+   * already-correct track makes the sync exact and instant. Resolves to an
+   * empty array when there is no other track to use.
+   *
+   * Reading an in-band track means briefly un-disabling it — see
+   * `peekTrackCues` — which for an HLS rendition costs one small WebVTT fetch.
+   */
+  collectReferenceCues: (signal?: AbortSignal) => Promise<SubtitleCue[]>;
 }
 
 export const OFF_ID = "off";
@@ -77,6 +106,46 @@ const readableCues = (track: TextTrack): TextTrackCueList | null => {
     }
   }
   return track.cues;
+};
+
+/**
+ * Read a track's cues without leaving it enabled.
+ *
+ * In-band and HLS subtitle tracks sit at mode "disabled", where `cues` is null.
+ * Moving one to "hidden" makes the engine populate it — and, for an HLS
+ * rendition, fetch it — so this waits (briefly, bounded) for cues to appear and
+ * then puts the mode back. Never "showing": that would put a second set of
+ * lines on screen behind the managed track.
+ */
+const peekTrackCues = async (
+  track: TextTrack,
+  timeoutMs = 3000,
+  signal?: AbortSignal,
+): Promise<SubtitleCue[]> => {
+  const existing = track.mode === "disabled" ? null : track.cues;
+  if (existing && existing.length > 0) return copyCues(existing);
+  if (signal?.aborted) return [];
+
+  const originalMode = track.mode;
+  try {
+    track.mode = "hidden";
+  } catch {
+    return [];
+  }
+  try {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline && !signal?.aborted && !(track.cues && track.cues.length > 0)) {
+      await new Promise((resolve) => window.setTimeout(resolve, 200));
+    }
+    return track.cues && track.cues.length > 0 ? copyCues(track.cues) : [];
+  } finally {
+    try {
+      track.mode = originalMode;
+    } catch {
+      // The render effect forces every non-managed track back to hidden on its
+      // next pass, so a refused restore is cosmetic.
+    }
+  }
 };
 
 const clearCues = (track: TextTrack): void => {
@@ -155,6 +224,9 @@ export const useSubtitles = (
    * selected. Dev StrictMode's extra render hid it; production did not.
    */
   const externalsRef = useRef<{ id: string; label: string; cues: SubtitleCue[] }[]>([]);
+  /** What the selected track looked like before the last automatic sync. */
+  const syncUndoRef = useRef<{ id: string; cues: SubtitleCue[]; offsetSec: number } | null>(null);
+  const [canUndoSyncedCues, setCanUndoSyncedCues] = useState(false);
   /** Cue count the managed track SHOULD have, for the self-healing poll. */
   const expectedCueCountRef = useRef(0);
   /** Source cue count last mirrored, so streamed-in cues can be picked up. */
@@ -170,6 +242,8 @@ export const useSubtitles = (
     setOffsetSec(0);
     setHint(null);
     mirroredCountRef.current = -1;
+    syncUndoRef.current = null;
+    setCanUndoSyncedCues(false);
   }, [contentKey, setExternals]);
 
   // Embedded tracks appear asynchronously (in-band tracks arrive after
@@ -398,6 +472,10 @@ export const useSubtitles = (
       );
       setSelectedId(id);
       setOffsetSec(0);
+      // The undo snapshot belongs to whatever was selected before. Leaving it
+      // armed means "Undo sync" would delete the file that was just added.
+      syncUndoRef.current = null;
+      setCanUndoSyncedCues(false);
       const message = `Added ${file.name} (${cues.length} lines)`;
       setHint(message);
       return message;
@@ -407,6 +485,126 @@ export const useSubtitles = (
       return message;
     }
   }, [setExternals]);
+
+  /**
+   * Swap in cues produced by an automatic sync.
+   *
+   * The synced timings are BAKED INTO THE CUES and the manual delay is reset to
+   * zero, rather than the sync being expressed as an offset. It has to be: a
+   * framerate correction and a piecewise result are not a single shift, so
+   * there is no offset that could represent them. It also means the "Delay"
+   * nudges keep working afterwards, as a manual adjustment ON TOP of the sync —
+   * which is what "manual offset adjustment afterwards" should feel like.
+   *
+   * The user's own file is never touched. Even for an external entry the cues
+   * are replaced only in memory; the file on disk is whatever they dropped.
+   */
+  const applySyncedCues = useCallback(
+    (cues: SubtitleCue[], label?: string, forTrackId?: string) => {
+      if (cues.length === 0) return false;
+      // A sync takes minutes; the user may well have picked a different track
+      // meanwhile. Applying one track's timings to another is worse than doing
+      // nothing, so the caller passes the track it started on and this refuses
+      // if the selection has moved.
+      if (forTrackId !== undefined && forTrackId !== selectedId) return false;
+      const prev = externalsRef.current;
+      const existing = prev.find((entry) => entry.id === selectedId);
+
+      if (existing) {
+        syncUndoRef.current = { id: existing.id, cues: existing.cues, offsetSec };
+        setExternals(prev.map((entry) => (entry.id === existing.id ? { ...entry, cues } : entry)));
+      } else {
+        // An embedded selection becomes a new external entry. Editing the
+        // embedded mirror in place would survive exactly one watchdog tick.
+        const id = `external:${(externalSeq.current += 1)}`;
+        const sourceLabel =
+          label ?? `${embedded.find((option) => option.id === selectedId)?.label ?? "Subtitles"} (synced)`;
+        syncUndoRef.current = { id: selectedId, cues: [], offsetSec };
+        setExternals([...prev, { id, label: sourceLabel, cues }]);
+        setSelectedId(id);
+      }
+      setOffsetSec(0);
+      setCanUndoSyncedCues(true);
+      return true;
+    },
+    [embedded, offsetSec, selectedId, setExternals],
+  );
+
+  /**
+   * Put back what was there before the last apply.
+   *
+   * For a track that was embedded, "before" was the embedded track itself, so
+   * undo re-selects it and drops the synced copy rather than restoring cues
+   * into an entry that did not exist.
+   */
+  const undoSyncedCues = useCallback(() => {
+    const snapshot = syncUndoRef.current;
+    if (!snapshot) return;
+    const prev = externalsRef.current;
+    if (snapshot.cues.length > 0) {
+      setExternals(
+        prev.map((entry) => (entry.id === snapshot.id ? { ...entry, cues: snapshot.cues } : entry)),
+      );
+      setSelectedId(snapshot.id);
+    } else {
+      setExternals(prev.filter((entry) => entry.id !== selectedId));
+      setSelectedId(snapshot.id);
+    }
+    setOffsetSec(snapshot.offsetSec);
+    syncUndoRef.current = null;
+    setCanUndoSyncedCues(false);
+    setHint("Undone — the original subtitles are back.");
+  }, [selectedId, setExternals]);
+
+  /**
+   * Find the longest set of cues belonging to a track OTHER than the selected
+   * one, to align against.
+   *
+   * "Longest" rather than "first" follows ffsubsync, which picks the embedded
+   * track with the largest time span: a forced-narrative track covering three
+   * signs is technically a subtitle track and useless as a reference.
+   *
+   * In-band tracks sit at mode "disabled", where `cues` is null, so each
+   * candidate is briefly moved to "hidden" — never "showing", which would put
+   * a second set of lines on screen — and its previous mode restored. The wait
+   * is bounded: an HLS rendition has to be fetched, and a track that never
+   * produces cues must not hold the whole sync up.
+   */
+  const collectReferenceCues = useCallback(async (signal?: AbortSignal): Promise<SubtitleCue[]> => {
+    let best: SubtitleCue[] = [];
+    // A whole-scan budget on top of the per-track one. A video with six
+    // subtitle renditions, none of which ever produce cues, would otherwise
+    // hold the sync for eighteen seconds before it even starts.
+    const deadline = Date.now() + 6000;
+    const consider = (cues: SubtitleCue[]) => {
+      if (cues.length === 0) return;
+      const span = cues[cues.length - 1].end - cues[0].start;
+      const bestSpan = best.length > 0 ? best[best.length - 1].end - best[0].start : -1;
+      if (span > bestSpan) best = cues;
+    };
+
+    for (const entry of externalsRef.current) {
+      if (entry.id !== selectedId) consider(entry.cues);
+    }
+
+    const video = videoRef.current;
+    const list = video?.textTracks;
+    if (list) {
+      const selectedIndex = selectedId.startsWith("embedded:")
+        ? Number(selectedId.slice("embedded:".length))
+        : -1;
+      for (let index = 0; index < list.length; index += 1) {
+        const track = list[index];
+        if (index === selectedIndex) continue;
+        if (track.language === MANAGED_TRACK_LANGUAGE) continue;
+        if (track.kind !== "subtitles" && track.kind !== "captions") continue;
+
+        if (signal?.aborted) break;
+        consider(await peekTrackCues(track, Math.max(0, Math.min(3000, deadline - Date.now())), signal));
+      }
+    }
+    return best;
+  }, [selectedId, videoRef]);
 
   // Let a status line linger long enough to read, then clear itself.
   useEffect(() => {
@@ -419,6 +617,10 @@ export const useSubtitles = (
     setSelectedId(id);
     // Alignment belongs to a specific track/file pairing, not to the item.
     setOffsetSec(0);
+    // The undo snapshot belongs to the track it was taken from; offering it
+    // after a switch would restore one track's cues onto another's entry.
+    syncUndoRef.current = null;
+    setCanUndoSyncedCues(false);
   }, []);
 
   const nudgeOffset = useCallback((deltaSec: number) => {
@@ -451,5 +653,9 @@ export const useSubtitles = (
     addFile,
     hint,
     hasSubtitles: embedded.length > 0 || externals.length > 0,
+    applySyncedCues,
+    undoSyncedCues,
+    canUndoSyncedCues,
+    collectReferenceCues,
   };
 };

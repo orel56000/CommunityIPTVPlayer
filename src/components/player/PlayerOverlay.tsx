@@ -76,6 +76,17 @@ export interface PlayerOverlayProps {
   onAddSubtitleFile?: () => void;
   /** Opens the match-a-line sync panel (only useful with a track selected). */
   onOpenSubtitleSync?: () => void;
+  /** Line the selected subtitles up with the speech, automatically. */
+  onAutoSyncSubtitles?: () => void;
+  /** Cancel a run in progress. */
+  onCancelAutoSync?: () => void;
+  autoSyncBusy?: boolean;
+  /** Where the run has got to, already phrased for a person. */
+  autoSyncStatus?: string | null;
+  /** Progress within the current stage, when it is knowable. */
+  autoSyncFraction?: number | null;
+  /** Put the pre-sync subtitles back. */
+  onUndoAutoSync?: () => void;
   subtitleHint?: string | null;
   /** A next episode is queued (series only) — shows the in-player skip button. */
   canPlayNext?: boolean;
@@ -142,6 +153,12 @@ export const PlayerOverlay = ({
   onResetSubtitleOffset,
   onAddSubtitleFile,
   onOpenSubtitleSync,
+  onAutoSyncSubtitles,
+  onCancelAutoSync,
+  autoSyncBusy = false,
+  autoSyncStatus = null,
+  autoSyncFraction = null,
+  onUndoAutoSync,
   subtitleHint = null,
   canPlayNext = false,
   nextEpisodeLabel = null,
@@ -196,6 +213,9 @@ export const PlayerOverlay = ({
   }, [subsOpen]);
 
   const zoomPercent = Math.round(videoScale * 100);
+  // Focus falls back here when a button that removes itself is pressed.
+  const autoSyncButtonRef = useRef<HTMLButtonElement | null>(null);
+
   const subtitleActive = subtitleSelectedId !== "off";
   const hasEmbeddedSubtitles = (subtitleOptions ?? []).some((option) => option.kind === "embedded");
   const subtitleActiveLabel =
@@ -606,6 +626,61 @@ export const PlayerOverlay = ({
                           <span className="text-slate-300">Delay</span>
                           <span className="tabular-nums text-cyan-300">{formatOffset(subtitleOffsetSec)}</span>
                         </div>
+                        {onAutoSyncSubtitles ? (
+                          <button
+                            ref={autoSyncButtonRef}
+                            type="button"
+                            className="mb-1.5 flex w-full items-center justify-center gap-1.5 rounded bg-cyan-500/20 px-2 py-1.5 text-[11px] font-medium text-cyan-100 transition hover:bg-cyan-500/30 disabled:cursor-default"
+                            // Unlike "Match a line", this deliberately does NOT
+                            // close the popover: the run takes a while and its
+                            // progress, result and Undo all land right here.
+                            onClick={() => (autoSyncBusy ? onCancelAutoSync?.() : onAutoSyncSubtitles())}
+                            disabled={autoSyncBusy && !onCancelAutoSync}
+                            title="Listen to the video and line the subtitles up with it"
+                          >
+                            {autoSyncBusy ? <Loader2 size={12} className="animate-spin" aria-hidden /> : null}
+                            {autoSyncBusy ? "Cancel sync" : "Sync subtitles"}
+                          </button>
+                        ) : null}
+                        {autoSyncStatus ? (
+                          <div className="mb-1.5">
+                            <p className="text-[10px] leading-snug text-cyan-300/90">{autoSyncStatus}</p>
+                            {autoSyncBusy ? (
+                              // An indeterminate bar when the stage cannot say
+                              // how far along it is — most of them cannot.
+                              <div className="mt-1 h-0.5 w-full overflow-hidden rounded bg-slate-800">
+                                <div
+                                  className={clsx(
+                                    "h-full rounded bg-cyan-400/80",
+                                    autoSyncFraction === null && "w-1/3 animate-pulse",
+                                  )}
+                                  style={
+                                    autoSyncFraction === null
+                                      ? undefined
+                                      : { width: `${Math.round(Math.min(1, Math.max(0, autoSyncFraction)) * 100)}%` }
+                                  }
+                                />
+                              </div>
+                            ) : null}
+                          </div>
+                        ) : null}
+                        {onUndoAutoSync && !autoSyncBusy ? (
+                          <button
+                            type="button"
+                            className="mb-2 w-full rounded bg-slate-800 px-2 py-1.5 text-[11px] text-slate-200 transition hover:bg-slate-700"
+                            onClick={() => {
+                              onUndoAutoSync();
+                              // This button removes itself, which on a TV
+                              // leaves focus on <body> and drops the user out
+                              // of the popover entirely. Hand it back to the
+                              // control they arrived from.
+                              window.setTimeout(() => autoSyncButtonRef.current?.focus(), 0);
+                            }}
+                            title="Put the subtitles back the way they were"
+                          >
+                            Undo sync
+                          </button>
+                        ) : null}
                         {onOpenSubtitleSync ? (
                           <button
                             type="button"

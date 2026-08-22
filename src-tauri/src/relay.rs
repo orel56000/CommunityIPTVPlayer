@@ -10,6 +10,8 @@
 //! - `/api/stream?url=`               byte relay for VOD / direct play
 //! - `/api/restream/index.m3u8?url=`  spawn bundled ffmpeg, return HLS manifest
 //! - `/api/restream/<session>/<seg>`  serve an HLS segment file
+//! - `/api/subsync`                   run an installed ffsubsync (POST)
+//! - `/api/subsync/reference`         reference speech for the frontend aligner
 //!
 //! The restream logic is a direct port of `api/restreamManager.ts`.
 
@@ -38,6 +40,8 @@ use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
+
+use crate::subsync;
 
 /// User-Agent that makes Xtream providers serve the real stream (not a debug page).
 const PLAYER_UA: &str = "Mozilla/5.0 (Linux; Android 11) AppleWebKit/537.36 ExoPlayerLib/2.18.1";
@@ -922,7 +926,21 @@ pub fn router(
         // state back. Bodies are tiny JSON — the default body limit is plenty.
         .route("/api/sync", get(sync_get))
         .route("/api/sync/command", post(sync_command_post))
-        .route("/api/sync/report", post(sync_report_post));
+        .route("/api/sync/report", post(sync_report_post))
+        // Automatic subtitle sync. POST hands the whole job to an installed
+        // ffsubsync; the GET returns only the reference speech signal so the
+        // frontend can finish with its own port of the aligner when there is
+        // no ffsubsync here. Both loopback-only: they spawn ffmpeg against a
+        // provider URL and can run for minutes, so a LAN peer reaching this
+        // relay gets the in-browser engine instead.
+        //
+        // The body carries a whole subtitle file — a few MB for a long film
+        // with per-character timing — so it needs a limit above the default.
+        .route(
+            "/api/subsync",
+            post(subsync_post).route_layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024)),
+        )
+        .route("/api/subsync/reference", get(subsync_reference));
 
     // Native window fullscreen — desktop only. macOS WKWebView can't use the
     // element Fullscreen API (enabling it breaks video rendering), so the
@@ -3046,6 +3064,121 @@ async fn reap_idle(sessions: &Arc<Mutex<HashMap<String, Arc<Session>>>>) {
             let _ = session.child.lock().await.start_kill();
             let _ = tokio::fs::remove_dir_all(&session.output_dir).await;
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// /api/subsync — automatic subtitle synchronization
+// ---------------------------------------------------------------------------
+
+/// Hand the job to an installed ffsubsync.
+///
+/// Answers 501 with `{"available":false}` when there is no ffsubsync on this
+/// machine, which the frontend reads as "use the reference endpoint instead".
+/// A 502 means ffsubsync ran and failed on the merits — the frontend surfaces
+/// that as-is rather than quietly re-running the same data through its own
+/// aligner and reporting a different reason.
+async fn subsync_post(
+    State(state): State<RelayState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    axum::Json(request): axum::Json<subsync::SyncRequest>,
+) -> Response {
+    if !peer.ip().is_loopback() {
+        return cors_text(StatusCode::FORBIDDEN, "loopback only".to_string());
+    }
+    let target = match parse_proxy_target(Some(request.url.as_str())) {
+        Ok(target) => target,
+        Err((status, message)) => return cors_text(status, message),
+    };
+    let host = host_of(target.as_str());
+    let burst = note_request(&state, &host).await;
+    log::info!(
+        "[subsync] aligning {} cues against host={host} ({burst} reqs/{}s)",
+        request.cues.len(),
+        REQUEST_RATE_WINDOW.as_secs()
+    );
+
+    match subsync::run_ffsubsync(state.ffmpeg.as_ref(), target.as_str(), &request).await {
+        Ok(result) => match serde_json::to_string(&result) {
+            Ok(body) => (
+                [(header::CONTENT_TYPE, "application/json")],
+                body,
+            )
+                .into_response(),
+            Err(e) => cors_text(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        },
+        Err(subsync::SyncError::NotInstalled) => (
+            StatusCode::NOT_IMPLEMENTED,
+            [(header::CONTENT_TYPE, "application/json")],
+            "{\"available\":false}".to_string(),
+        )
+            .into_response(),
+        Err(subsync::SyncError::Failed(message)) => {
+            log::warn!("[subsync] ffsubsync failed: {message}");
+            cors_text(StatusCode::BAD_GATEWAY, message)
+        }
+        Err(subsync::SyncError::Internal(message)) => {
+            log::error!("[subsync] {message}");
+            cors_text(StatusCode::INTERNAL_SERVER_ERROR, message)
+        }
+    }
+}
+
+/// Decode the reference audio and return only the 100 Hz speech signal.
+///
+/// One byte per 10 ms — roughly 1 MB for a three-hour film, against the many
+/// gigabytes the browser would otherwise have to pull through itself. The
+/// frontend aligns against this with the same code it uses in web-only mode.
+async fn subsync_reference(
+    State(state): State<RelayState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Query(q): Query<subsync::ReferenceQuery>,
+) -> Response {
+    if !peer.ip().is_loopback() {
+        return cors_text(StatusCode::FORBIDDEN, "loopback only".to_string());
+    }
+    let target = match parse_proxy_target(Some(q.url.as_str())) {
+        Ok(target) => target,
+        Err((status, message)) => return cors_text(status, message),
+    };
+    let host = host_of(target.as_str());
+    let burst = note_request(&state, &host).await;
+    log::info!(
+        "[subsync] extracting reference speech host={host} ({burst} reqs/{}s)",
+        REQUEST_RATE_WINDOW.as_secs()
+    );
+
+    match subsync::extract_reference_speech(
+        state.ffmpeg.as_ref(),
+        target.as_str(),
+        q.start.unwrap_or(0.0).max(0.0),
+        q.max,
+    )
+    .await
+    {
+        Ok(speech) => {
+            log::info!(
+                "[subsync] reference speech: {:.0}s ({} speech samples)",
+                speech.samples.len() as f64 / subsync::SAMPLE_RATE as f64,
+                speech.samples.iter().filter(|v| **v > 0).count()
+            );
+            let mut builder = Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "application/octet-stream")
+                .header(header::CACHE_CONTROL, "no-store")
+                .header(
+                    header::ACCESS_CONTROL_EXPOSE_HEADERS,
+                    "X-Subsync-Sample-Rate, X-Subsync-Seconds",
+                );
+            for (name, value) in subsync::reference_headers(&speech) {
+                builder = builder.header(name, value);
+            }
+            builder
+                .body(Body::from(speech.samples))
+                .unwrap_or_else(|e| cors_text(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        }
+        Err(subsync::SyncError::Failed(message)) => cors_text(StatusCode::BAD_GATEWAY, message),
+        Err(e) => cors_text(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
 

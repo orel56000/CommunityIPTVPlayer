@@ -1,6 +1,7 @@
 #[cfg(desktop)]
 mod cast;
 mod relay;
+mod subsync;
 
 use std::net::{SocketAddr, TcpListener};
 use std::path::PathBuf;

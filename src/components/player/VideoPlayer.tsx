@@ -30,6 +30,8 @@ import { CreditsOverlay } from "./CreditsOverlay";
 import { PlayerNavBar } from "./PlayerNavBar";
 import { PlayerOverlay } from "./PlayerOverlay";
 import { SubtitleSyncPanel } from "./SubtitleSyncPanel";
+import { canSyncSubtitles, syncSubtitles } from "../../utils/subtitleSync";
+import type { SubtitleSyncPhase, SubtitleSyncResult } from "../../types/subtitleSync";
 
 interface VideoPlayerProps {
   item: PlaylistItem | null;
@@ -51,6 +53,14 @@ interface VideoPlayerProps {
   onPlayNextEpisode?: () => void;
   /** Play a video file the user dropped on the player, outside any playlist. */
   onPlayLocalFile?: (file: File) => void;
+  /**
+   * The File behind a locally-played item, when there is one.
+   *
+   * Its blob: URL is enough to PLAY the video, but not to analyse it: automatic
+   * subtitle sync has to decode the audio, and only the File itself can be read
+   * lazily rather than pulled into memory whole.
+   */
+  localFile?: File | null;
   /** Intrinsic size and length of the loaded media, once known. */
   onMediaInfo?: (info: { width: number; height: number; durationSec: number | null }) => void;
   /** Suggest the next episode once the end credits are detected. */
@@ -372,6 +382,7 @@ export const VideoPlayer = ({
   nextEpisode = null,
   onPlayNextEpisode,
   onPlayLocalFile,
+  localFile,
   onMediaInfo,
   creditsDetection = true,
   creditsAutoNext = false,
@@ -642,6 +653,150 @@ export const VideoPlayer = ({
     },
     [subtitles],
   );
+
+  /* --- automatic subtitle sync ------------------------------------------ */
+
+  const [autoSyncBusy, setAutoSyncBusy] = useState(false);
+  const [autoSyncStatus, setAutoSyncStatus] = useState<string | null>(null);
+  const [autoSyncFraction, setAutoSyncFraction] = useState<number | null>(null);
+  const autoSyncAbortRef = useRef<AbortController | null>(null);
+
+  /** The stages, in the order they happen, phrased for the person watching. */
+  const AUTO_SYNC_STAGE: Record<SubtitleSyncPhase, string> = useMemo(
+    () => ({
+      "preparing-audio": "Preparing audio…",
+      "detecting-speech": "Detecting speech…",
+      "finding-alignment": "Finding alignment…",
+      applying: "Applying sync…",
+      done: "Done",
+    }),
+    [],
+  );
+
+  /**
+   * What the media is, from the sync engine's point of view.
+   *
+   * A dropped file is a blob: URL that exists only in this tab, so the backend
+   * could never fetch it — the File goes instead, and the browser engine reads
+   * it lazily. Library content is a real URL the backend can pull itself,
+   * which is the whole reason the native path is worth having.
+   */
+  const syncMedia = useMemo(
+    () => ({
+      file: localFile ?? undefined,
+      // Through the relay, exactly as playback fetches it. The raw provider URL
+      // is not fetchable from this page — wrong CORS, and often a redirect that
+      // only works with the player headers — so the browser engine has to ask
+      // for it the same way the video element does. The native engine unwraps
+      // it again (see subtitleSync.ts) since it fetches the provider directly.
+      url: localFile ? undefined : item?.streamUrl ? toRelayUrl(item.streamUrl) : undefined,
+      durationSec: Number.isFinite(duration) && duration > 0 ? duration : undefined,
+    }),
+    [localFile, item?.streamUrl, duration],
+  );
+
+  const canAutoSync =
+    subtitles.selectedId !== "off" &&
+    subtitles.selectedCues.length > 0 &&
+    canSyncSubtitles({ media: syncMedia });
+
+  const describeSyncResult = useCallback((result: SubtitleSyncResult): string => {
+    if (!result.applied) {
+      return `Couldn't find a confident match — ${result.qualityReasons[0] ?? "the subtitles were left alone"}. Try matching a line instead.`;
+    }
+    // Two decimals, not formatOffset's one. formatOffset exists for the manual
+    // delay, where the controls move in 0.5s steps and a tenth is all the
+    // precision there is; the aligner works to a hundredth of a second and
+    // rounding "+2.37s" to "+2.4s" throws that away in the one place the user
+    // is being told what it found.
+    const seconds = result.offsetMs / 1000;
+    const shift = `${seconds >= 0 ? "+" : ""}${seconds.toFixed(2).replace(/\.?0+$/, "")}s`;
+    const where = result.processingMode === "native" ? "" : " (in your browser)";
+    if (result.perCueOffsetsMs) {
+      const segments = result.segments?.length ?? 1;
+      return `Subtitles synchronized in ${segments} section${segments === 1 ? "" : "s"}, around ${shift}${where}`;
+    }
+    if (Math.abs(result.framerateScaleFactor - 1) > 1e-6) {
+      return `Subtitles synchronized: ${shift} and a framerate correction${where}`;
+    }
+    return `Subtitles synchronized: ${shift}${where}`;
+  }, []);
+
+  const handleAutoSync = useCallback(async () => {
+    if (autoSyncBusy) return;
+    const cues = subtitles.selectedCues;
+    if (cues.length === 0) {
+      setAutoSyncStatus("Pick a subtitle track first.");
+      return;
+    }
+
+    // The run belongs to THIS track. A sync takes minutes and the user may pick
+    // a different one meanwhile; applying these timings to that track would be
+    // worse than not syncing at all.
+    const startedOn = subtitles.selectedId;
+
+    const controller = new AbortController();
+    autoSyncAbortRef.current = controller;
+    setAutoSyncBusy(true);
+    setAutoSyncFraction(null);
+    setAutoSyncStatus("Preparing audio…");
+
+    try {
+      // ffsubsync's own default is to align against the video's other subtitle
+      // track when there is one — exact, instant, and no audio decoded at all.
+      // Only fall through to listening when there isn't.
+      const referenceCues = await subtitles.collectReferenceCues(controller.signal);
+      if (controller.signal.aborted) return;
+
+      const result = await syncSubtitles({
+        cues,
+        media: syncMedia,
+        referenceCues: referenceCues.length > 0 ? referenceCues : undefined,
+        signal: controller.signal,
+        onProgress: ({ phase, fraction, detail }) => {
+          setAutoSyncFraction(fraction ?? null);
+          setAutoSyncStatus(detail ? `${AUTO_SYNC_STAGE[phase]} ${detail}` : AUTO_SYNC_STAGE[phase]);
+        },
+      });
+      if (controller.signal.aborted) return;
+
+      setAutoSyncStatus(AUTO_SYNC_STAGE.applying);
+      setAutoSyncFraction(null);
+      if (!result.applied) {
+        setAutoSyncStatus(describeSyncResult(result));
+        return;
+      }
+      if (!subtitles.applySyncedCues(result.subtitles, undefined, startedOn)) {
+        setAutoSyncStatus("Finished, but you changed track — nothing was applied.");
+        return;
+      }
+      setAutoSyncStatus(describeSyncResult(result));
+    } catch (error) {
+      if (controller.signal.aborted || (error instanceof DOMException && error.name === "AbortError")) {
+        setAutoSyncStatus(null);
+      } else {
+        setAutoSyncStatus(
+          `Sync failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      setAutoSyncFraction(null);
+    } finally {
+      if (autoSyncAbortRef.current === controller) autoSyncAbortRef.current = null;
+      setAutoSyncBusy(false);
+    }
+  }, [AUTO_SYNC_STAGE, autoSyncBusy, describeSyncResult, subtitles, syncMedia]);
+
+  const handleCancelAutoSync = useCallback(() => {
+    autoSyncAbortRef.current?.abort();
+  }, []);
+
+  // A run belongs to the item it was started on; loading another one must not
+  // leave it applying its answer to a different film's subtitles.
+  useEffect(() => {
+    autoSyncAbortRef.current?.abort();
+    setAutoSyncStatus(null);
+    setAutoSyncFraction(null);
+  }, [item?.id]);
 
   const [dropNotice, setDropNotice] = useState<string | null>(null);
   useEffect(() => {
@@ -2002,6 +2157,17 @@ export const VideoPlayer = ({
             onOpenSubtitleSync={
               subtitles.selectedId === "off" ? undefined : () => setSubtitleSyncOpen(true)
             }
+            // Kept mounted while a run is in flight even if the selection
+            // changed underneath it — otherwise the button (and with it the
+            // only way to cancel) disappears mid-sync.
+            onAutoSyncSubtitles={
+              canAutoSync || autoSyncBusy ? () => void handleAutoSync() : undefined
+            }
+            onCancelAutoSync={handleCancelAutoSync}
+            autoSyncBusy={autoSyncBusy}
+            autoSyncStatus={autoSyncStatus}
+            autoSyncFraction={autoSyncFraction}
+            onUndoAutoSync={subtitles.canUndoSyncedCues ? subtitles.undoSyncedCues : undefined}
             subtitleHint={subtitles.hint}
             canPlayNext={Boolean(nextEpisode)}
             nextEpisodeLabel={
