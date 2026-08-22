@@ -6,6 +6,7 @@ import type { CreditsFeedbackRecord } from "../../types/credits";
 import type { EpisodeItem, PlaylistItem } from "../../types/models";
 import type { VideoFitMode } from "../../types/player";
 import { useChromecast } from "../../hooks/useChromecast";
+import { CastDevicePicker } from "./CastDevicePicker";
 import { useCreditsDetection } from "../../hooks/useCreditsDetection";
 import { useSubtitles } from "../../hooks/useSubtitles";
 import { offsetForMatch } from "../../utils/subtitles";
@@ -1914,6 +1915,20 @@ export const VideoPlayer = ({
               onClose={() => setSubtitleSyncOpen(false)}
             />
           ) : null}
+          {/* A sibling of the video, NOT a child of PlayerOverlay. That overlay
+              is click-through (pointer-events-none, re-enabled per control) and
+              fades itself out with the controls — a dialog nested inside it
+              inherited both, so every click on a device landed on the video
+              underneath and started/stopped playback instead. */}
+          <CastDevicePicker
+            devices={castDevices}
+            pending={pendingCastDevice}
+            itemTitle={title}
+            onPick={selectCastDevice}
+            onConfirm={() => void confirmCastDevice()}
+            onDismissConfirm={dismissCastConfirm}
+            onCancel={cancelCastPicker}
+          />
           {dropNotice ? (
             <div className="pointer-events-none absolute bottom-28 left-1/2 z-30 -translate-x-1/2 rounded-lg bg-amber-500/15 px-3 py-1.5 text-xs text-amber-100 shadow-lg ring-1 ring-amber-400/30">
               {dropNotice}
@@ -1953,12 +1968,6 @@ export const VideoPlayer = ({
             isFullscreen={isFullscreen || cssFullscreen}
             canPip={canPip}
             canCast={canCast}
-            castDevices={castDevices}
-            pendingCastDevice={pendingCastDevice}
-            onPickCastDevice={selectCastDevice}
-            onConfirmCastDevice={() => void confirmCastDevice()}
-            onDismissCastConfirm={dismissCastConfirm}
-            onCancelCastPicker={cancelCastPicker}
             castActive={isCasting}
             castDeviceLabel={deviceName}
             castHint={castMessage}

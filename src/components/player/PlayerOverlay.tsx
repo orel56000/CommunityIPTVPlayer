@@ -25,8 +25,6 @@ import type { VideoFitMode } from "../../types/player";
 import { formatOffset } from "../../utils/subtitles";
 import type { SubtitleOption } from "../../hooks/useSubtitles";
 import { formatDuration } from "../../utils/time";
-import { CastDevicePicker } from "./CastDevicePicker";
-import type { RelayCastDevice } from "../../hooks/useChromecast";
 
 export interface PlayerOverlayProps {
   title: string;
@@ -37,14 +35,6 @@ export interface PlayerOverlayProps {
   isFullscreen: boolean;
   canPip: boolean;
   canCast: boolean;
-  /** Devices found by the relay's native Cast discovery (null = picker closed). */
-  castDevices?: RelayCastDevice[] | null;
-  /** Device picked from that list, held until the user confirms it. */
-  pendingCastDevice?: RelayCastDevice | null;
-  onPickCastDevice?: (device: RelayCastDevice) => void;
-  onConfirmCastDevice?: () => void;
-  onDismissCastConfirm?: () => void;
-  onCancelCastPicker?: () => void;
   /** Receiver is connected and media is routed to Cast. */
   castActive?: boolean;
   /** Friendly name from Cast device (e.g. Living Room TV). */
@@ -120,12 +110,6 @@ export const PlayerOverlay = ({
   isFullscreen,
   canPip,
   canCast,
-  castDevices = null,
-  pendingCastDevice = null,
-  onPickCastDevice,
-  onConfirmCastDevice,
-  onDismissCastConfirm,
-  onCancelCastPicker,
   castActive = false,
   castDeviceLabel = null,
   castHint = null,
@@ -853,15 +837,6 @@ export const PlayerOverlay = ({
           </p>
         ) : null}
       </div>
-      <CastDevicePicker
-        devices={castDevices}
-        pending={pendingCastDevice}
-        itemTitle={title}
-        onPick={(device) => onPickCastDevice?.(device)}
-        onConfirm={() => onConfirmCastDevice?.()}
-        onDismissConfirm={() => onDismissCastConfirm?.()}
-        onCancel={() => onCancelCastPicker?.()}
-      />
     </div>
   );
 };
