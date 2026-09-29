@@ -51,7 +51,7 @@ const defaultState: PersistedState = {
     creditsDetection: true,
     creditsAutoNext: false,
     videoFitMode: "contain",
-    debugMode: true,
+    debugMode: false,
     theme: "dark",
     sidebarCollapsed: false,
     rightPanelOpen: true,
