@@ -175,13 +175,16 @@ jobs:
           APPLE_SIGNING_IDENTITY: "-"
         run: npm run tauri:build
 
-      # Guard for the step that seeds AppRun above: fail the build if anything
-      # in the AppImage is readable or executable only by its owner/group,
-      # rather than finding out from a user (or the catalog) that it won't
-      # start. The SquashFS image starts right after the runtime's ELF section
+      # Fail the build on the two ways an AppImage has shipped unable to start,
+      # rather than finding out from a user (or the catalog):
+      # - anything readable or executable only by its owner/group (guards the
+      #   step that seeds AppRun above);
+      # - no bundled tray library: the app panics at startup without it on
+      #   systems that don't have it installed (see `tray-icon` in Cargo.toml).
+      # The SquashFS image starts right after the runtime's ELF section
       # headers (e_shoff + e_shentsize * e_shnum); computed here rather than
       # asked of the runtime, which may need libfuse2 just to load.
-      - name: Check AppImage file permissions
+      - name: Check AppImage contents
         if: runner.os == 'Linux'
         shell: bash
         run: |
@@ -197,6 +200,10 @@ jobs:
             if [ -n "$bad" ]; then
               echo "::error title=AppImage permissions::Files other users cannot read/run in $f"
               echo "$bad"
+              exit 1
+            fi
+            if ! grep -q 'squashfs-root/usr/lib/libayatana-appindicator3\.so\.1' appimage-files.txt; then
+              echo "::error title=AppImage tray library::libayatana-appindicator3.so.1 is not bundled in $f"
               exit 1
             fi
           done

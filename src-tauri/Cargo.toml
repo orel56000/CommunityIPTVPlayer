@@ -21,7 +21,14 @@ tauri-build = { version = "2.4.1", features = [] }
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
-tauri = { version = "2.11.2", features = [] }
+# `tray-icon` has to be listed here, not only under the desktop-only table
+# below: the Tauri CLI reads the features of the first `tauri` entry it finds,
+# and only when it sees `tray-icon` does it bundle libayatana-appindicator into
+# the AppImage (and make the .deb/.rpm depend on it). Without it the app
+# panics at startup on any system that lacks the library. The feature is inert
+# on Android/iOS: Tauri compiles its tray code, and pulls in the tray-icon
+# crate, on desktop only.
+tauri = { version = "2.11.2", features = ["tray-icon"] }
 tauri-plugin-log = "2"
 
 # Local HTTP relay (axum + reqwest + tokio) — see src/relay.rs
@@ -40,11 +47,10 @@ url = "2"
 tower-http = { version = "0.5", features = ["fs", "cors", "set-header"] }
 tauri-plugin-opener = "2"
 
-# Desktop-only dependencies. The system tray, and native Google Cast (rust_cast
-# pulls OpenSSL; mDNS discovery is desktop-oriented) are excluded from the
-# Android/iOS builds, which have no OpenSSL toolchain and their own cast stack.
+# Desktop-only dependencies. Native Google Cast (rust_cast pulls OpenSSL; mDNS
+# discovery is desktop-oriented) is excluded from the Android/iOS builds, which
+# have no OpenSSL toolchain and their own cast stack.
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
-tauri = { version = "2.11.2", features = ["tray-icon"] }
 rust_cast = "0.21"
 mdns-sd = "0.20"
 
