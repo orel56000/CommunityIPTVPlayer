@@ -253,8 +253,16 @@ jobs:
       # Explicit SDK setup (cmdline-tools + accepted licenses) rather than
       # relying on whatever happens to ship on the runner image, so a runner
       # image change can't silently break this job.
+      #
+      # `packages` must be set: v3's default also installs the legacy `tools`
+      # package, which Google's SDK repository no longer serves, so sdkmanager
+      # fails with "Failed to find package 'tools'" (first hit on v0.9.13).
+      # Nothing here used `tools`; the build only ever needed platform-tools
+      # from this step (the NDK is installed explicitly below).
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
 
       - name: Install Android NDK
         run: sdkmanager --install "ndk;${NDK_VERSION}"
