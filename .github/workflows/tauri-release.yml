@@ -90,7 +90,26 @@ jobs:
             libssl-dev \
             build-essential \
             file \
-            rpm
+            rpm \
+            squashfs-tools
+
+      # Tauri's AppImage bundler downloads its AppRun launcher into its cache
+      # with mode 0770 and copies it into the AppDir as-is, where linuxdeploy's
+      # GTK plugin renames it AppRun.wrapped. When root mounts the AppImage and
+      # another user starts it (firejail --appimage, and so the AppImage
+      # catalog at appimage.github.io), that launcher is not executable and the
+      # app dies with "AppRun.wrapped: Permission denied" before any window.
+      # The bundler only downloads it when the cached copy is missing, so seed
+      # the cache with the same file at 0755 first. (tauri-apps/tauri#16155;
+      # still 0770 in the bundler source as of 2.12.)
+      - name: Seed Tauri's AppRun with world-executable permissions
+        if: runner.os == 'Linux'
+        run: |
+          TOOLS="${XDG_CACHE_HOME:-$HOME/.cache}/tauri"
+          mkdir -p "$TOOLS"
+          curl -fsSL -o "$TOOLS/AppRun-x86_64" \
+            https://github.com/tauri-apps/binary-releases/releases/download/apprun-old/AppRun-x86_64
+          chmod 0755 "$TOOLS/AppRun-x86_64"
 
       - name: Install dependencies
         run: npm ci
@@ -155,6 +174,32 @@ jobs:
         env:
           APPLE_SIGNING_IDENTITY: "-"
         run: npm run tauri:build
+
+      # Guard for the step that seeds AppRun above: fail the build if anything
+      # in the AppImage is readable or executable only by its owner/group,
+      # rather than finding out from a user (or the catalog) that it won't
+      # start. The SquashFS image starts right after the runtime's ELF section
+      # headers (e_shoff + e_shentsize * e_shnum); computed here rather than
+      # asked of the runtime, which may need libfuse2 just to load.
+      - name: Check AppImage file permissions
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          for f in src-tauri/target/release/bundle/appimage/*.AppImage; do
+            offset=$(python3 -c 'import struct, sys
+          h = open(sys.argv[1], "rb").read(64)
+          print(struct.unpack_from("<Q", h, 0x28)[0] + struct.unpack_from("<H", h, 0x3A)[0] * struct.unpack_from("<H", h, 0x3C)[0])' "$f")
+            unsquashfs -lln -o "$offset" "$f" > appimage-files.txt
+            grep -q 'squashfs-root/AppRun' appimage-files.txt
+            bad=$(awk '
+              $1 ~ /^[-d]/ && ((substr($1,2,1) == "r" && substr($1,8,1) != "r") ||
+                               (substr($1,4,1) == "x" && substr($1,10,1) != "x"))' appimage-files.txt)
+            if [ -n "$bad" ]; then
+              echo "::error title=AppImage permissions::Files other users cannot read/run in $f"
+              echo "$bad"
+              exit 1
+            fi
+          done
 
       # Tauri's bundler names files from productName + version + arch/locale
       # (e.g. "Community IPTV Player_0.9.0_x64_en-US.msi") — rename to a short,
