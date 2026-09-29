@@ -42,7 +42,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",
-    "@tauri-apps/cli": "^2.11.2",
+    "@tauri-apps/cli": "^2.11.5",
     "@types/chrome": "^0.1.40",
     "@types/chromecast-caf-sender": "^1.0.11",
     "@types/node": "^25.6.0",

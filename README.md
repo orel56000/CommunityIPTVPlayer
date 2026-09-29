@@ -138,7 +138,7 @@ Prebuilt bundles for every tagged version are published on the [Releases page](h
 | macOS (Apple Silicon) | `ctv_<version>_macos-arm64.dmg` |
 | macOS (Intel) | `ctv_<version>_macos-x64.dmg` |
 | Windows | `ctv_<version>_windows.msi` or `ctv_<version>_windows.exe` |
-| Linux | `ctv_<version>_linux.deb`, `ctv_<version>_linux.rpm`, or `ctv_<version>_linux.AppImage` |
+| Linux | `ctv_<version>_linux.deb`, `ctv_<version>_linux.rpm`, or `ctv_<version>_x86_64.AppImage` |
 | Android | `ctv_<version>_android-arm64.apk` |
 
 On an Apple Silicon Mac, take the `macos-arm64` build. The `macos-x64` one still runs, through Rosetta, but transcoding is noticeably slower.

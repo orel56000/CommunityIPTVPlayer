@@ -162,6 +162,10 @@ jobs:
       # job below: ctv_<version>_<platform>.<ext>. Reads the version from
       # package.json rather than the git ref so a workflow_dispatch test run
       # (no tag) still gets a real, meaningful name instead of an empty one.
+      # The AppImage is the one exception: it is named by architecture
+      # (ctv_<version>_x86_64.AppImage), because the AppImage catalog
+      # (appimage.github.io) flags "linux" in an AppImage's name — every
+      # AppImage is for Linux, so the word says nothing there.
       - name: Rename release artifacts
         shell: bash
         run: |
@@ -172,7 +176,9 @@ jobs:
             for f in $pattern; do
               [ -f "$f" ] || continue
               ext="${f##*.}"
-              cp "$f" "release-assets/ctv_${VERSION}_${{ matrix.platform }}.${ext}"
+              platform="${{ matrix.platform }}"
+              [ "$ext" = "AppImage" ] && platform="x86_64"
+              cp "$f" "release-assets/ctv_${VERSION}_${platform}.${ext}"
             done
           done <<< "${{ matrix.artifacts }}"
           ls -la release-assets/

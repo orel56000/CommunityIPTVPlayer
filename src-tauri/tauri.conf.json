@@ -19,6 +19,8 @@
     "active": true,
     "targets": "all",
     "publisher": "Community IPTV Player contributors",
+    "category": "Video",
+    "shortDescription": "Free, open-source IPTV player for M3U and Xtream playlists",
     "externalBin": ["binaries/ffmpeg"],
     "resources": {
       "../dist": "dist"
